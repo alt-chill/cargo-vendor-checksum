@@ -1,6 +1,6 @@
 # cargo-vendor-checksum
 It is a tool for updating checksum files in vendor directories. After
-modifying files, e.g. then patching sources for building packages.
+modifying files, e.g. when patching sources for building packages.
 
 ## Examples
 If you already in the package catalog. Run the following command to update
@@ -18,4 +18,4 @@ Checksum for alt files could be updated via command:
 ```
 cargo-vendor-checksum --all
 ```
-This comman could take a lot of time to complete.
+This command could take a lot of time to complete.
