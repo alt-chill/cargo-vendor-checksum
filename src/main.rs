@@ -8,23 +8,30 @@ use std::path::PathBuf;
 use anyhow::{bail, Context, Result};
 use clap::{Command, CommandFactory, Parser};
 use clap_complete::{generate, Generator, Shell};
-use clap_derive::Parser;
+use clap_derive::{Args, Parser};
 use serde::{Deserialize, Serialize};
+
+#[derive(Args, Debug)]
+#[group(required = true, multiple = false)]
+struct Files {
+    #[arg(long, alias = "files", short, value_name = "FILES")]
+    files_in_vendor_dir: Vec<PathBuf>,
+
+    #[arg(long, short, num_args(1..))]
+    packages: Vec<OsString>,
+
+    #[arg(long, short)]
+    all: bool,
+}
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None, infer_long_args(true))]
-struct Args {
-    #[arg(long, alias = "files", short, required(false), value_name = "FILES")]
-    files_in_vendor_dir: Vec<PathBuf>,
+struct Cli {
+    #[command(flatten)]
+    files: Files,
 
     #[arg(long, default_value = "vendor", value_name = "DIR")]
     vendor: PathBuf,
-
-    #[arg(long, required(false), num_args(1..))]
-    packages: Vec<OsString>,
-
-    #[arg(long, required(false))]
-    all: bool,
 
     #[arg(long, required(false), value_name = "SHELL")]
     completion: Option<Shell>,
@@ -72,22 +79,22 @@ fn print_completions<G: Generator>(gen: G, cmd: &mut Command) {
 }
 
 fn main() -> Result<()> {
-    let args = Args::parse();
+    let args = Cli::parse();
     let mut checksums: BTreeMap<OsString, Checksum> = BTreeMap::new();
     let vendor = args.vendor;
     let files_in_vendor_dir: Vec<PathBuf>;
     let packages: Vec<OsString>;
 
     if let Some(generator) = args.completion {
-        print_completions(generator, &mut Args::command());
+        print_completions(generator, &mut Cli::command());
     }
 
-    if args.all {
+    if args.files.all {
         packages = get_packages(&vendor)?;
         files_in_vendor_dir = vec![];
     } else {
-        files_in_vendor_dir = args.files_in_vendor_dir;
-        packages = args.packages;
+        files_in_vendor_dir = args.files.files_in_vendor_dir;
+        packages = args.files.packages;
     }
 
     for file_in_vendor_dir in files_in_vendor_dir {
