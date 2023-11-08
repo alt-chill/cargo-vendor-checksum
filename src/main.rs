@@ -121,26 +121,9 @@ fn process_files_in_vendor_dir<V: AsRef<Path>>(
     write_checksums(checksums)
 }
 
-fn main() -> Result<()> {
-    let args = Cli::parse();
+fn process_packages<V: AsRef<Path>>(vendor: V, packages: Vec<OsString>) -> Result<()> {
     let mut checksums: BTreeMap<OsString, Checksum> = BTreeMap::new();
-    let vendor = args.vendor;
-    let files_in_vendor_dir: Vec<PathBuf>;
-    let packages: Vec<OsString>;
-
-    if let Some(generator) = args.completion {
-        print_completions(generator, &mut Cli::command());
-    }
-
-    if args.files.all {
-        packages = get_packages(&vendor)?;
-        files_in_vendor_dir = vec![];
-    } else {
-        files_in_vendor_dir = args.files.files_in_vendor_dir;
-        packages = args.files.packages;
-    }
-
-    process_files_in_vendor_dir(&vendor, files_in_vendor_dir)?;
+    let vendor = vendor.as_ref();
 
     for pkg in packages {
         let path = Path::new(&vendor).join(&pkg);
@@ -158,7 +141,29 @@ fn main() -> Result<()> {
         }
     }
 
-    write_checksums(checksums)?;
+    write_checksums(checksums)
+}
+
+fn main() -> Result<()> {
+    let args = Cli::parse();
+    let vendor = args.vendor;
+    let files_in_vendor_dir: Vec<PathBuf>;
+    let packages: Vec<OsString>;
+
+    if let Some(generator) = args.completion {
+        print_completions(generator, &mut Cli::command());
+    }
+
+    if args.files.all {
+        packages = get_packages(&vendor)?;
+        files_in_vendor_dir = vec![];
+    } else {
+        files_in_vendor_dir = args.files.files_in_vendor_dir;
+        packages = args.files.packages;
+    }
+
+    process_files_in_vendor_dir(&vendor, files_in_vendor_dir)?;
+    process_packages(&vendor, packages)?;
 
     Ok(())
 }
