@@ -4,6 +4,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
+use std::thread;
 
 use anyhow::{bail, Context, Result};
 use clap::{Command, CommandFactory, Parser};
@@ -32,6 +33,9 @@ struct Cli {
 
     #[arg(long, default_value = "vendor", value_name = "DIR")]
     vendor: PathBuf,
+
+    #[arg(long)]
+    threads: bool,
 
     #[arg(long, required(false), value_name = "SHELL")]
     completion: Option<Shell>,
@@ -87,9 +91,11 @@ fn write_checksums(checksums: BTreeMap<OsString, Checksum>) -> Result<()> {
 }
 
 fn process_files_in_vendor_dir<V: AsRef<Path>>(
+    threads: bool,
     vendor: V,
     files_in_vendor_dir: Vec<PathBuf>,
 ) -> Result<()> {
+    let mut children = vec![];
     let mut checksums: BTreeMap<OsString, Checksum> = BTreeMap::new();
     let vendor = vendor.as_ref();
 
@@ -108,20 +114,45 @@ fn process_files_in_vendor_dir<V: AsRef<Path>>(
             checksums.insert(pkg.to_owned(), Checksum::new(&cksum_file)?);
         }
         let file_in_pkg = file_parts[1..].iter().collect::<PathBuf>();
-        let digest = sha256::try_digest(&full_file).with_context(|| {
-            format!("failed to get checksum for file `{}`", full_file.display())
-        })?;
-        checksums
-            .get_mut(&pkg)
-            .expect("Checksum should be created")
-            .files
-            .insert(file_in_pkg, digest);
+        if threads {
+            children.push(thread::spawn(move || -> Result<(OsString, PathBuf, String)> {
+                let digest = sha256::try_digest(&full_file).with_context(|| {
+                    format!("failed to get checksum for file `{}`", full_file.display())
+                })?;
+                Ok((pkg, file_in_pkg, digest))
+            }));
+        } else {
+            let digest = sha256::try_digest(&full_file).with_context(|| {
+                format!("failed to get checksum for file `{}`", full_file.display())
+            })?;
+            checksums
+                .get_mut(&pkg)
+                .expect("Checksum should be created")
+                .files
+                .insert(file_in_pkg, digest);
+        }
+    }
+
+    if threads {
+        for child in children {
+            let (pkg, file_in_pkg, digest) = child.join().expect("Panic in thread")?;
+            checksums
+                .get_mut(&pkg)
+                .expect("Checksum should be created")
+                .files
+                .insert(file_in_pkg, digest);
+        }
     }
 
     write_checksums(checksums)
 }
 
-fn process_packages<V: AsRef<Path>>(vendor: V, packages: Vec<OsString>) -> Result<()> {
+fn process_packages<V: AsRef<Path>>(
+    threads: bool,
+    vendor: V,
+    packages: Vec<OsString>,
+) -> Result<()> {
+    let mut children = vec![];
     let mut checksums: BTreeMap<OsString, Checksum> = BTreeMap::new();
     let vendor = vendor.as_ref();
 
@@ -132,12 +163,42 @@ fn process_packages<V: AsRef<Path>>(vendor: V, packages: Vec<OsString>) -> Resul
             let mut checksum = Checksum::new(&cksum_file)?;
             for relative_file in checksum.files.to_owned().into_keys() {
                 let file = path.join(&relative_file);
-                let digest = sha256::try_digest(&file).with_context(|| {
-                    format!("failed to get checksum for file `{}`", file.display())
-                })?;
-                checksum.files.insert(relative_file.to_owned(), digest);
+                if threads {
+                    let pkg = pkg.to_owned();
+                    if !checksums.contains_key(&pkg) {
+                        let cksum_file = vendor.join(&pkg).join(".cargo-checksum.json");
+                        checksums.insert(pkg.to_owned(), Checksum::new(&cksum_file)?);
+                    }
+                    children.push(thread::spawn(
+                        move || -> Result<(OsString, PathBuf, String)> {
+                            let digest = sha256::try_digest(&file).with_context(|| {
+                                format!("failed to get checksum for file `{}`", file.display())
+                            })?;
+                            Ok((pkg, relative_file, digest))
+                        },
+                    ));
+                } else {
+                    let digest = sha256::try_digest(&file).with_context(|| {
+                        format!("failed to get checksum for file `{}`", file.display())
+                    })?;
+                    checksum.files.insert(relative_file.to_owned(), digest);
+                }
             }
-            checksums.insert(pkg.to_owned(), checksum);
+
+            if !threads {
+                checksums.insert(pkg.to_owned(), checksum);
+            }
+        }
+    }
+
+    if threads {
+        for child in children {
+            let (pkg, file_in_pkg, digest) = child.join().expect("Panic in thread")?;
+            checksums
+                .get_mut(&pkg)
+                .expect("Checksum should be created")
+                .files
+                .insert(file_in_pkg, digest);
         }
     }
 
@@ -147,17 +208,18 @@ fn process_packages<V: AsRef<Path>>(vendor: V, packages: Vec<OsString>) -> Resul
 fn main() -> Result<()> {
     let args = Cli::parse();
     let vendor = args.vendor;
+    let threads = args.threads;
 
     if let Some(generator) = args.completion {
         print_completions(generator, &mut Cli::command());
     }
 
     if !args.files.files_in_vendor_dir.is_empty() {
-        process_files_in_vendor_dir(&vendor, args.files.files_in_vendor_dir)?;
+        process_files_in_vendor_dir(threads, &vendor, args.files.files_in_vendor_dir)?;
     } else if args.files.all {
-        process_packages(&vendor, get_packages(&vendor)?)?;
+        process_packages(threads, &vendor, get_packages(&vendor)?)?;
     } else {
-        process_packages(&vendor, args.files.packages)?;
+        process_packages(threads, &vendor, args.files.packages)?;
     }
 
     Ok(())
