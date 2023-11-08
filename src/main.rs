@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Args, Debug)]
 #[group(required = true, multiple = false)]
 struct Files {
-    #[arg(long, alias = "files", short, value_name = "FILES")]
+    #[arg(long, alias = "files", short, num_args(1..),  value_name = "FILES")]
     files_in_vendor_dir: Vec<PathBuf>,
 
     #[arg(long, short, num_args(1..))]
