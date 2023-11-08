@@ -147,23 +147,18 @@ fn process_packages<V: AsRef<Path>>(vendor: V, packages: Vec<OsString>) -> Resul
 fn main() -> Result<()> {
     let args = Cli::parse();
     let vendor = args.vendor;
-    let files_in_vendor_dir: Vec<PathBuf>;
-    let packages: Vec<OsString>;
 
     if let Some(generator) = args.completion {
         print_completions(generator, &mut Cli::command());
     }
 
-    if args.files.all {
-        packages = get_packages(&vendor)?;
-        files_in_vendor_dir = vec![];
+    if !args.files.files_in_vendor_dir.is_empty() {
+        process_files_in_vendor_dir(&vendor, args.files.files_in_vendor_dir)?;
+    } else if args.files.all {
+        process_packages(&vendor, get_packages(&vendor)?)?;
     } else {
-        files_in_vendor_dir = args.files.files_in_vendor_dir;
-        packages = args.files.packages;
+        process_packages(&vendor, args.files.packages)?;
     }
-
-    process_files_in_vendor_dir(&vendor, files_in_vendor_dir)?;
-    process_packages(&vendor, packages)?;
 
     Ok(())
 }
