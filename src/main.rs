@@ -78,6 +78,14 @@ fn print_completions<G: Generator>(gen: G, cmd: &mut Command) {
     generate(gen, cmd, cmd.get_name().to_string(), &mut io::stdout());
 }
 
+fn write_checksums(checksums: BTreeMap<OsString, Checksum>) -> Result<()> {
+    for (_pkg, checksum) in checksums {
+        checksum.write()?;
+    }
+
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let args = Cli::parse();
     let mut checksums: BTreeMap<OsString, Checksum> = BTreeMap::new();
@@ -138,9 +146,7 @@ fn main() -> Result<()> {
         }
     }
 
-    for (_pkg, checksum) in checksums {
-        checksum.write()?;
-    }
+    write_checksums(checksums)?;
 
     Ok(())
 }
