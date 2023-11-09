@@ -22,6 +22,9 @@ struct Files {
 
     #[arg(long, short)]
     all: bool,
+
+    #[arg(long, required(false), value_name = "SHELL")]
+    completion: Option<Shell>,
 }
 
 #[derive(Parser, Debug)]
@@ -32,9 +35,6 @@ struct Cli {
 
     #[arg(long, default_value = "vendor", value_name = "DIR")]
     vendor: PathBuf,
-
-    #[arg(long, required(false), value_name = "SHELL")]
-    completion: Option<Shell>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -148,7 +148,7 @@ fn main() -> Result<()> {
     let args = Cli::parse();
     let vendor = args.vendor;
 
-    if let Some(generator) = args.completion {
+    if let Some(generator) = args.files.completion {
         print_completions(generator, &mut Cli::command());
     }
 
