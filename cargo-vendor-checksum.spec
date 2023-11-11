@@ -5,7 +5,7 @@ Release:  alt1
 Summary:  It is a tool for updating checksum files in vendor directories
 License:  MIT
 Group:    Development/Other
-Url:      https://github.com/Obirvalger/vml
+Url:      https://github.com/alt-chill/cargo-vendor-checksum
 
 Packager: Mikhail Gordeev <obirvalger@altlinux.org>
 
