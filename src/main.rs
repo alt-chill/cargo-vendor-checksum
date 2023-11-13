@@ -9,6 +9,8 @@ use anyhow::{bail, Context, Result};
 use clap::{Command, CommandFactory, Parser};
 use clap_complete::{generate, Generator, Shell};
 use clap_derive::{Args, Parser};
+use rayon::prelude::*;
+use rayon::ThreadPoolBuilder;
 use serde::{Deserialize, Serialize};
 
 #[derive(Args, Debug)]
@@ -35,6 +37,9 @@ struct Cli {
 
     #[arg(long, default_value = "vendor", value_name = "DIR")]
     vendor: PathBuf,
+
+    #[arg(long, value_name("NUM"))]
+    num_threads: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -88,12 +93,11 @@ fn write_checksums(checksums: BTreeMap<OsString, Checksum>) -> Result<()> {
 
 fn process_files_in_vendor_dir<V: AsRef<Path>>(
     vendor: V,
-    files_in_vendor_dir: Vec<PathBuf>,
+    files_in_vendor_dir: &[PathBuf],
 ) -> Result<()> {
-    let mut checksums: BTreeMap<OsString, Checksum> = BTreeMap::new();
     let vendor = vendor.as_ref();
 
-    for file_in_vendor_dir in files_in_vendor_dir {
+    let results = files_in_vendor_dir.par_iter().map(|file_in_vendor_dir| {
         let file_parts = file_in_vendor_dir.iter().collect::<Vec<&OsStr>>();
         if file_parts.len() < 2 {
             bail!(
@@ -102,15 +106,21 @@ fn process_files_in_vendor_dir<V: AsRef<Path>>(
             );
         }
         let pkg = file_parts[0].to_owned();
-        let full_file = vendor.join(&file_in_vendor_dir);
-        if !checksums.contains_key(&pkg) {
-            let cksum_file = vendor.join(&pkg).join(".cargo-checksum.json");
-            checksums.insert(pkg.to_owned(), Checksum::new(&cksum_file)?);
-        }
+        let full_file = vendor.join(file_in_vendor_dir);
         let file_in_pkg = file_parts[1..].iter().collect::<PathBuf>();
         let digest = sha256::try_digest(&full_file).with_context(|| {
             format!("failed to get checksum for file `{}`", full_file.display())
         })?;
+        Ok((pkg, file_in_pkg, digest))
+    });
+
+    let mut checksums: BTreeMap<OsString, Checksum> = BTreeMap::new();
+    for result in results.collect::<Vec<_>>() {
+        let (pkg, file_in_pkg, digest) = result?;
+        if !checksums.contains_key(&pkg) {
+            let cksum_file = vendor.join(&pkg).join(".cargo-checksum.json");
+            checksums.insert(pkg.to_owned(), Checksum::new(&cksum_file)?);
+        }
         checksums
             .get_mut(&pkg)
             .expect("Checksum should be created")
@@ -121,27 +131,33 @@ fn process_files_in_vendor_dir<V: AsRef<Path>>(
     write_checksums(checksums)
 }
 
-fn process_packages<V: AsRef<Path>>(vendor: V, packages: Vec<OsString>) -> Result<()> {
-    let mut checksums: BTreeMap<OsString, Checksum> = BTreeMap::new();
+fn process_packages<V: AsRef<Path>>(vendor: V, packages: &[OsString]) -> Result<()> {
     let vendor = vendor.as_ref();
 
-    for pkg in packages {
-        let path = Path::new(&vendor).join(&pkg);
-        if !checksums.contains_key(&pkg) {
-            let cksum_file = path.join(".cargo-checksum.json");
-            let mut checksum = Checksum::new(&cksum_file)?;
-            for relative_file in checksum.files.to_owned().into_keys() {
-                let file = path.join(&relative_file);
-                let digest = sha256::try_digest(&file).with_context(|| {
-                    format!("failed to get checksum for file `{}`", file.display())
-                })?;
-                checksum.files.insert(relative_file.to_owned(), digest);
-            }
-            checksums.insert(pkg.to_owned(), checksum);
-        }
-    }
+    packages.par_iter().try_for_each(|pkg| -> Result<()> {
+        let path = Path::new(&vendor).join(pkg);
+        let cksum_file = path.join(".cargo-checksum.json");
+        let mut checksum = Checksum::new(&cksum_file)?;
+        let results = checksum
+            .files
+            .to_owned()
+            .into_keys()
+            .collect::<Vec<_>>()
+            .par_iter()
+            .map(|relative_file| -> Result<_> {
+                let file = path.join(relative_file);
+                let digest = sha256::try_digest(&file)?;
+                Ok((relative_file.to_owned(), digest))
+            })
+            .collect::<Vec<_>>();
 
-    write_checksums(checksums)
+        for result in results {
+            let (file, digest) = result?;
+            checksum.files.insert(file.to_owned(), digest);
+        }
+
+        checksum.write()
+    })
 }
 
 fn main() -> Result<()> {
@@ -152,13 +168,21 @@ fn main() -> Result<()> {
         print_completions(generator, &mut Cli::command());
     }
 
-    if !args.files.files_in_vendor_dir.is_empty() {
-        process_files_in_vendor_dir(&vendor, args.files.files_in_vendor_dir)?;
-    } else if args.files.all {
-        process_packages(&vendor, get_packages(&vendor)?)?;
-    } else {
-        process_packages(&vendor, args.files.packages)?;
+    let mut thread_pool_builder = ThreadPoolBuilder::new();
+    if let Some(num_threads) = args.num_threads {
+        thread_pool_builder = thread_pool_builder.num_threads(num_threads);
     }
+    let thread_pool = thread_pool_builder.build()?;
+
+    thread_pool.install(|| {
+        if !args.files.files_in_vendor_dir.is_empty() {
+            process_files_in_vendor_dir(&vendor, &args.files.files_in_vendor_dir)
+        } else if args.files.all {
+            process_packages(&vendor, &get_packages(&vendor)?)
+        } else {
+            process_packages(&vendor, &args.files.packages)
+        }
+    })?;
 
     Ok(())
 }
