@@ -146,7 +146,9 @@ fn process_packages<V: AsRef<Path>>(vendor: V, packages: &[OsString]) -> Result<
             .par_iter()
             .map(|relative_file| -> Result<_> {
                 let file = path.join(relative_file);
-                let digest = sha256::try_digest(&file)?;
+                let digest = sha256::try_digest(&file).with_context(|| {
+                    format!("failed to get checksum for file `{}`", file.display())
+                })?;
                 Ok((relative_file.to_owned(), digest))
             })
             .collect::<Vec<_>>();
