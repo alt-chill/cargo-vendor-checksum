@@ -2,6 +2,9 @@
 It is a tool for updating checksum files in vendor directories. After
 modifying files, e.g. when patching sources for building packages.
 
+Flag `--ignore-missing` could be used to remove checksums for absent files.
+For example after deleting `.a` files.
+
 ## Examples
 If you already in the package catalog. Run the following command to update
 checksum for file `nix/src/net/mod.rs`:

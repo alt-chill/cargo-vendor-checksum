@@ -38,6 +38,9 @@ struct Cli {
     #[arg(long, default_value = "vendor", value_name = "DIR")]
     vendor: PathBuf,
 
+    #[arg(long)]
+    ignore_missing: bool,
+
     #[arg(long, value_name("NUM"))]
     num_threads: Option<usize>,
 }
@@ -94,6 +97,7 @@ fn write_checksums(checksums: BTreeMap<OsString, Checksum>) -> Result<()> {
 fn process_files_in_vendor_dir<V: AsRef<Path>>(
     vendor: V,
     files_in_vendor_dir: &[PathBuf],
+    ignore_missing: bool,
 ) -> Result<()> {
     let vendor = vendor.as_ref();
 
@@ -108,10 +112,15 @@ fn process_files_in_vendor_dir<V: AsRef<Path>>(
         let pkg = file_parts[0].to_owned();
         let full_file = vendor.join(file_in_vendor_dir);
         let file_in_pkg = file_parts[1..].iter().collect::<PathBuf>();
+
+        if ignore_missing && !full_file.exists() {
+            return Ok((pkg, file_in_pkg, None));
+        }
+
         let digest = sha256::try_digest(&full_file).with_context(|| {
             format!("failed to get checksum for file `{}`", full_file.display())
         })?;
-        Ok((pkg, file_in_pkg, digest))
+        Ok((pkg, file_in_pkg, Some(digest)))
     });
 
     let mut checksums: BTreeMap<OsString, Checksum> = BTreeMap::new();
@@ -121,17 +130,22 @@ fn process_files_in_vendor_dir<V: AsRef<Path>>(
             let cksum_file = vendor.join(&pkg).join(".cargo-checksum.json");
             checksums.insert(pkg.to_owned(), Checksum::new(&cksum_file)?);
         }
-        checksums
-            .get_mut(&pkg)
-            .expect("Checksum should be created")
-            .files
-            .insert(file_in_pkg, digest);
+        let files = &mut checksums.get_mut(&pkg).expect("Checksum should be created").files;
+        if let Some(digest) = digest {
+            files.insert(file_in_pkg, digest);
+        } else {
+            files.remove(&file_in_pkg);
+        }
     }
 
     write_checksums(checksums)
 }
 
-fn process_packages<V: AsRef<Path>>(vendor: V, packages: &[OsString]) -> Result<()> {
+fn process_packages<V: AsRef<Path>>(
+    vendor: V,
+    packages: &[OsString],
+    ignore_missing: bool,
+) -> Result<()> {
     let vendor = vendor.as_ref();
 
     packages.par_iter().try_for_each(|pkg| -> Result<()> {
@@ -146,16 +160,23 @@ fn process_packages<V: AsRef<Path>>(vendor: V, packages: &[OsString]) -> Result<
             .par_iter()
             .map(|relative_file| -> Result<_> {
                 let file = path.join(relative_file);
+                if ignore_missing && !file.exists() {
+                    return Ok((relative_file.to_owned(), None));
+                }
                 let digest = sha256::try_digest(&file).with_context(|| {
                     format!("failed to get checksum for file `{}`", file.display())
                 })?;
-                Ok((relative_file.to_owned(), digest))
+                Ok((relative_file.to_owned(), Some(digest)))
             })
             .collect::<Vec<_>>();
 
         for result in results {
             let (file, digest) = result?;
-            checksum.files.insert(file.to_owned(), digest);
+            if let Some(digest) = digest {
+                checksum.files.insert(file, digest);
+            } else {
+                checksum.files.remove(&file);
+            }
         }
 
         checksum.write()
@@ -178,11 +199,15 @@ fn main() -> Result<()> {
 
     thread_pool.install(|| {
         if !args.files.files_in_vendor_dir.is_empty() {
-            process_files_in_vendor_dir(&vendor, &args.files.files_in_vendor_dir)
+            process_files_in_vendor_dir(
+                &vendor,
+                &args.files.files_in_vendor_dir,
+                args.ignore_missing,
+            )
         } else if args.files.all {
-            process_packages(&vendor, &get_packages(&vendor)?)
+            process_packages(&vendor, &get_packages(&vendor)?, args.ignore_missing)
         } else {
-            process_packages(&vendor, &args.files.packages)
+            process_packages(&vendor, &args.files.packages, args.ignore_missing)
         }
     })?;
 
