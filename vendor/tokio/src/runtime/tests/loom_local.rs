@@ -9,7 +9,7 @@ use std::task::Poll;
 /// to the runtime itself. This means that if they are not properly removed at
 /// runtime shutdown, this will cause a memory leak.
 ///
-/// This test verifies that waking something during shutdown of a LocalSet does
+/// This test verifies that waking something during shutdown of a `LocalSet` does
 /// not result in tasks lingering in the queue once shutdown is complete. This
 /// is verified using loom's leak finder.
 #[test]
@@ -23,7 +23,7 @@ fn wake_during_shutdown() {
         ls.spawn_local(async move {
             let mut send = Some(send);
 
-            let () = futures::future::poll_fn(|cx| {
+            let () = std::future::poll_fn(|cx| {
                 if let Some(send) = send.take() {
                     send.send(cx.waker().clone());
                 }

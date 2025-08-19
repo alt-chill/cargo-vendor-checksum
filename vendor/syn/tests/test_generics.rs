@@ -1,11 +1,15 @@
 #![allow(
+    clippy::elidable_lifetime_names,
     clippy::manual_let_else,
+    clippy::needless_lifetimes,
     clippy::too_many_lines,
     clippy::uninlined_format_args
 )]
 
 #[macro_use]
-mod macros;
+mod snapshot;
+
+mod debug;
 
 use quote::quote;
 use syn::{DeriveInput, ItemFn, TypeParamBound, WhereClause, WherePredicate};
@@ -16,7 +20,7 @@ fn test_split_for_impl() {
         struct S<'a, 'b: 'a, #[may_dangle] T: 'a = ()> where T: Debug;
     };
 
-    snapshot!(input as DeriveInput, @r###"
+    snapshot!(input as DeriveInput, @r#"
     DeriveInput {
         vis: Visibility::Inherited,
         ident: "S",
@@ -28,6 +32,7 @@ fn test_split_for_impl() {
                         ident: "a",
                     },
                 }),
+                Token![,],
                 GenericParam::Lifetime(LifetimeParam {
                     lifetime: Lifetime {
                         ident: "b",
@@ -39,6 +44,7 @@ fn test_split_for_impl() {
                         },
                     ],
                 }),
+                Token![,],
                 GenericParam::Type(TypeParam {
                     attrs: [
                         Attribute {
@@ -96,7 +102,7 @@ fn test_split_for_impl() {
             semi_token: Some,
         },
     }
-    "###);
+    "#);
 
     let generics = input.generics;
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
@@ -124,23 +130,23 @@ fn test_split_for_impl() {
 }
 
 #[test]
-fn test_ty_param_bound() {
+fn test_type_param_bound() {
     let tokens = quote!('a);
-    snapshot!(tokens as TypeParamBound, @r###"
+    snapshot!(tokens as TypeParamBound, @r#"
     TypeParamBound::Lifetime {
         ident: "a",
     }
-    "###);
+    "#);
 
     let tokens = quote!('_);
-    snapshot!(tokens as TypeParamBound, @r###"
+    snapshot!(tokens as TypeParamBound, @r#"
     TypeParamBound::Lifetime {
         ident: "_",
     }
-    "###);
+    "#);
 
     let tokens = quote!(Debug);
-    snapshot!(tokens as TypeParamBound, @r###"
+    snapshot!(tokens as TypeParamBound, @r#"
     TypeParamBound::Trait(TraitBound {
         path: Path {
             segments: [
@@ -150,10 +156,10 @@ fn test_ty_param_bound() {
             ],
         },
     })
-    "###);
+    "#);
 
     let tokens = quote!(?Sized);
-    snapshot!(tokens as TypeParamBound, @r###"
+    snapshot!(tokens as TypeParamBound, @r#"
     TypeParamBound::Trait(TraitBound {
         modifier: TraitBoundModifier::Maybe,
         path: Path {
@@ -164,7 +170,43 @@ fn test_ty_param_bound() {
             ],
         },
     })
-    "###);
+    "#);
+
+    let tokens = quote!(for<'a> Trait);
+    snapshot!(tokens as TypeParamBound, @r#"
+    TypeParamBound::Trait(TraitBound {
+        lifetimes: Some(BoundLifetimes {
+            lifetimes: [
+                GenericParam::Lifetime(LifetimeParam {
+                    lifetime: Lifetime {
+                        ident: "a",
+                    },
+                }),
+            ],
+        }),
+        path: Path {
+            segments: [
+                PathSegment {
+                    ident: "Trait",
+                },
+            ],
+        },
+    })
+    "#);
+
+    let tokens = quote!(for<> ?Trait);
+    let err = syn::parse2::<TypeParamBound>(tokens).unwrap_err();
+    assert_eq!(
+        "`for<...>` binder not allowed with `?` trait polarity modifier",
+        err.to_string(),
+    );
+
+    let tokens = quote!(?for<> Trait);
+    let err = syn::parse2::<TypeParamBound>(tokens).unwrap_err();
+    assert_eq!(
+        "`for<...>` binder not allowed with `?` trait polarity modifier",
+        err.to_string(),
+    );
 }
 
 #[test]
@@ -179,7 +221,7 @@ fn test_fn_precedence_in_where_clause() {
         }
     };
 
-    snapshot!(input as ItemFn, @r###"
+    snapshot!(input as ItemFn, @r#"
     ItemFn {
         vis: Visibility::Inherited,
         sig: Signature {
@@ -227,6 +269,7 @@ fn test_fn_precedence_in_where_clause() {
                                         ],
                                     },
                                 }),
+                                Token![+],
                                 TypeParamBound::Trait(TraitBound {
                                     path: Path {
                                         segments: [
@@ -238,14 +281,17 @@ fn test_fn_precedence_in_where_clause() {
                                 }),
                             ],
                         }),
+                        Token![,],
                     ],
                 }),
             },
             output: ReturnType::Default,
         },
-        block: Block,
+        block: Block {
+            stmts: [],
+        },
     }
-    "###);
+    "#);
 
     let where_clause = input.sig.generics.where_clause.as_ref().unwrap();
     assert_eq!(where_clause.predicates.len(), 1);

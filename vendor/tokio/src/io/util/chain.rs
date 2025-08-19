@@ -4,7 +4,7 @@ use pin_project_lite::pin_project;
 use std::fmt;
 use std::io;
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::task::{ready, Context, Poll};
 
 pin_project! {
     /// Stream for the [`chain`](super::AsyncReadExt::chain) method.
@@ -114,7 +114,7 @@ where
 
         if !*me.done_first {
             match ready!(me.first.poll_fill_buf(cx)?) {
-                buf if buf.is_empty() => {
+                [] => {
                     *me.done_first = true;
                 }
                 buf => return Poll::Ready(Ok(buf)),

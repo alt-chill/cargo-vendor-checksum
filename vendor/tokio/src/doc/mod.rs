@@ -20,4 +20,28 @@
 #[derive(Debug)]
 pub enum NotDefinedHere {}
 
+#[cfg(feature = "net")]
+impl mio::event::Source for NotDefinedHere {
+    fn register(
+        &mut self,
+        _registry: &mio::Registry,
+        _token: mio::Token,
+        _interests: mio::Interest,
+    ) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn reregister(
+        &mut self,
+        _registry: &mio::Registry,
+        _token: mio::Token,
+        _interests: mio::Interest,
+    ) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn deregister(&mut self, _registry: &mio::Registry) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(any(feature = "net", feature = "fs"))]
 pub mod os;

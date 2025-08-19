@@ -5,9 +5,7 @@ use std::path::Path;
 /// of the original file to the destination file.
 /// This function will overwrite the contents of to.
 ///
-/// This is the async equivalent of [`std::fs::copy`][std].
-///
-/// [std]: fn@std::fs::copy
+/// This is the async equivalent of [`std::fs::copy`].
 ///
 /// # Examples
 ///
@@ -19,7 +17,6 @@ use std::path::Path;
 /// # Ok(())
 /// # }
 /// ```
-
 pub async fn copy(from: impl AsRef<Path>, to: impl AsRef<Path>) -> Result<u64, std::io::Error> {
     let from = from.as_ref().to_owned();
     let to = to.as_ref().to_owned();

@@ -7,6 +7,7 @@ use std::ffi::OsStr;
 use std::io::{self, Read, Write};
 use std::pin::Pin;
 use std::ptr;
+use std::ptr::null_mut;
 use std::task::{Context, Poll};
 
 use crate::io::{AsyncRead, AsyncWrite, Interest, PollEvented, ReadBuf, Ready};
@@ -17,7 +18,7 @@ cfg_io_util! {
 }
 
 // Hide imports which are not used when generating documentation.
-#[cfg(not(docsrs))]
+#[cfg(windows)]
 mod doc {
     pub(super) use crate::os::windows::ffi::OsStrExt;
     pub(super) mod windows_sys {
@@ -30,7 +31,7 @@ mod doc {
 }
 
 // NB: none of these shows up in public API, so don't document them.
-#[cfg(docsrs)]
+#[cfg(not(windows))]
 mod doc {
     pub(super) mod mio_windows {
         pub type NamedPipe = crate::doc::NotDefinedHere;
@@ -75,7 +76,8 @@ use self::doc::*;
 /// let server = tokio::spawn(async move {
 ///     loop {
 ///         // Wait for a client to connect.
-///         let connected = server.connect().await?;
+///         server.connect().await?;
+///         let connected_client = server;
 ///
 ///         // Construct the next server to be connected before sending the one
 ///         // we already have of onto a task. This ensures that the server
@@ -2059,7 +2061,7 @@ impl ServerOptions {
     ///
     /// ```
     /// use std::{io, os::windows::prelude::AsRawHandle, ptr};
-    //
+    ///
     /// use tokio::net::windows::named_pipe::ServerOptions;
     /// use windows_sys::{
     ///     Win32::Foundation::ERROR_SUCCESS,
@@ -2094,7 +2096,7 @@ impl ServerOptions {
     ///
     /// ```
     /// use std::{io, os::windows::prelude::AsRawHandle, ptr};
-    //
+    ///
     /// use tokio::net::windows::named_pipe::ServerOptions;
     /// use windows_sys::{
     ///     Win32::Foundation::ERROR_ACCESS_DENIED,
@@ -2555,7 +2557,7 @@ impl ClientOptions {
             attrs as *mut _,
             windows_sys::OPEN_EXISTING,
             self.get_flags(),
-            0,
+            null_mut(),
         );
 
         if h == windows_sys::INVALID_HANDLE_VALUE {
@@ -2626,7 +2628,7 @@ pub enum PipeEnd {
 /// Information about a named pipe.
 ///
 /// Constructed through [`NamedPipeServer::info`] or [`NamedPipeClient::info`].
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct PipeInfo {
     /// Indicates the mode of a named pipe.

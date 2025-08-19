@@ -1,9 +1,9 @@
 use crate::sync::mpsc;
 
-use futures::future::poll_fn;
 use loom::future::block_on;
 use loom::sync::Arc;
 use loom::thread;
+use std::future::poll_fn;
 use tokio_test::assert_ok;
 
 #[test]
@@ -186,5 +186,39 @@ fn try_recv() {
         for th in ths {
             th.join().unwrap();
         }
+    });
+}
+
+#[test]
+fn len_nonzero_after_send() {
+    loom::model(|| {
+        let (send, recv) = mpsc::channel(10);
+        let send2 = send.clone();
+
+        let join = thread::spawn(move || {
+            block_on(send2.send("message2")).unwrap();
+        });
+
+        block_on(send.send("message1")).unwrap();
+        assert!(recv.len() != 0);
+
+        join.join().unwrap();
+    });
+}
+
+#[test]
+fn nonempty_after_send() {
+    loom::model(|| {
+        let (send, recv) = mpsc::channel(10);
+        let send2 = send.clone();
+
+        let join = thread::spawn(move || {
+            block_on(send2.send("message2")).unwrap();
+        });
+
+        block_on(send.send("message1")).unwrap();
+        assert!(!recv.is_empty());
+
+        join.join().unwrap();
     });
 }

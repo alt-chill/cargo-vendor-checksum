@@ -1,11 +1,10 @@
-use crate::future::poll_fn;
 use crate::time::{sleep_until, Duration, Instant, Sleep};
 use crate::util::trace;
 
-use std::future::Future;
+use std::future::{poll_fn, Future};
 use std::panic::Location;
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::task::{ready, Context, Poll};
 
 /// Creates new [`Interval`] that yields with interval of `period`. The first
 /// tick completes immediately. The default [`MissedTickBehavior`] is
@@ -122,6 +121,7 @@ fn internal_interval_at(
         let location = location.expect("should have location if tracing");
 
         tracing::trace_span!(
+            parent: None,
             "runtime.resource",
             concrete_type = "Interval",
             kind = "timer",
@@ -140,7 +140,7 @@ fn internal_interval_at(
     Interval {
         delay,
         period,
-        missed_tick_behavior: Default::default(),
+        missed_tick_behavior: MissedTickBehavior::default(),
         #[cfg(all(tokio_unstable, feature = "tracing"))]
         resource_span,
     }
@@ -479,7 +479,9 @@ impl Interval {
             self.missed_tick_behavior
                 .next_timeout(timeout, now, self.period)
         } else {
-            timeout + self.period
+            timeout
+                .checked_add(self.period)
+                .unwrap_or_else(Instant::far_future)
         };
 
         // When we arrive here, the internal delay returned `Poll::Ready`.

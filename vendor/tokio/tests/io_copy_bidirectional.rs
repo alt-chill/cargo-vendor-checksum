@@ -59,6 +59,7 @@ where
 }
 
 #[tokio::test]
+#[cfg_attr(miri, ignore)] // No `socket` in miri.
 async fn test_basic_transfer() {
     symmetric(|_handle, mut a, mut b| async move {
         a.write_all(b"test").await.unwrap();
@@ -70,6 +71,7 @@ async fn test_basic_transfer() {
 }
 
 #[tokio::test]
+#[cfg_attr(miri, ignore)] // No `socket` in miri.
 async fn test_transfer_after_close() {
     symmetric(|handle, mut a, mut b| async move {
         AsyncWriteExt::shutdown(&mut a).await.unwrap();
@@ -89,6 +91,7 @@ async fn test_transfer_after_close() {
 }
 
 #[tokio::test]
+#[cfg_attr(miri, ignore)] // No `socket` in miri.
 async fn blocking_one_side_does_not_block_other() {
     symmetric(|handle, mut a, mut b| async move {
         block_write(&mut a).await;
@@ -137,4 +140,29 @@ async fn immediate_exit_on_read_error() {
     let mut b = tokio_test::io::Builder::new().read_error(error()).build();
 
     assert!(copy_bidirectional(&mut a, &mut b).await.is_err());
+}
+
+#[tokio::test]
+async fn copy_bidirectional_is_cooperative() {
+    tokio::select! {
+        biased;
+        _ = async {
+            loop {
+                let payload = b"here, take this";
+
+                let mut a = tokio_test::io::Builder::new()
+                    .read(payload)
+                    .write(payload)
+                    .build();
+
+                let mut b = tokio_test::io::Builder::new()
+                    .read(payload)
+                    .write(payload)
+                    .build();
+
+                let _ = copy_bidirectional(&mut a, &mut b).await;
+            }
+        } => {},
+        _ = tokio::task::yield_now() => {}
+    }
 }

@@ -1,11 +1,13 @@
-#![cfg(not(feature = "preserve_order"))]
 #![allow(
     clippy::assertions_on_result_states,
+    clippy::byte_char_slices,
     clippy::cast_precision_loss,
     clippy::derive_partial_eq_without_eq,
     clippy::excessive_precision,
     clippy::float_cmp,
+    clippy::incompatible_msrv, // https://github.com/rust-lang/rust-clippy/issues/12257
     clippy::items_after_statements,
+    clippy::large_digit_groups,
     clippy::let_underscore_untyped,
     clippy::shadow_unrelated,
     clippy::too_many_lines,
@@ -14,9 +16,6 @@
     clippy::vec_init_then_push,
     clippy::zero_sized_map_values
 )]
-#![cfg_attr(feature = "trace-macros", feature(trace_macros))]
-#[cfg(feature = "trace-macros")]
-trace_macros!(true);
 
 #[macro_use]
 mod macros;
@@ -33,21 +32,19 @@ use serde_json::{
     from_reader, from_slice, from_str, from_value, json, to_string, to_string_pretty, to_value,
     to_vec, Deserializer, Number, Value,
 };
-use std::collections::hash_map::DefaultHasher;
 use std::collections::BTreeMap;
 #[cfg(feature = "raw_value")]
 use std::collections::HashMap;
 use std::fmt::{self, Debug};
+use std::hash::BuildHasher;
+#[cfg(feature = "raw_value")]
 use std::hash::{Hash, Hasher};
 use std::io;
 use std::iter;
 use std::marker::PhantomData;
 use std::mem;
 use std::str::FromStr;
-use std::string::ToString;
 use std::{f32, f64};
-use std::{i16, i32, i64, i8};
-use std::{u16, u32, u64, u8};
 
 macro_rules! treemap {
     () => {
@@ -160,28 +157,28 @@ fn test_write_f64() {
 
 #[test]
 fn test_encode_nonfinite_float_yields_null() {
-    let v = to_value(::std::f64::NAN.copysign(1.0)).unwrap();
+    let v = to_value(f64::NAN.copysign(1.0)).unwrap();
     assert!(v.is_null());
 
-    let v = to_value(::std::f64::NAN.copysign(-1.0)).unwrap();
+    let v = to_value(f64::NAN.copysign(-1.0)).unwrap();
     assert!(v.is_null());
 
-    let v = to_value(::std::f64::INFINITY).unwrap();
+    let v = to_value(f64::INFINITY).unwrap();
     assert!(v.is_null());
 
-    let v = to_value(-::std::f64::INFINITY).unwrap();
+    let v = to_value(-f64::INFINITY).unwrap();
     assert!(v.is_null());
 
-    let v = to_value(::std::f32::NAN.copysign(1.0)).unwrap();
+    let v = to_value(f32::NAN.copysign(1.0)).unwrap();
     assert!(v.is_null());
 
-    let v = to_value(::std::f32::NAN.copysign(-1.0)).unwrap();
+    let v = to_value(f32::NAN.copysign(-1.0)).unwrap();
     assert!(v.is_null());
 
-    let v = to_value(::std::f32::INFINITY).unwrap();
+    let v = to_value(f32::INFINITY).unwrap();
     assert!(v.is_null());
 
-    let v = to_value(-::std::f32::INFINITY).unwrap();
+    let v = to_value(-f32::INFINITY).unwrap();
     assert!(v.is_null());
 }
 
@@ -272,11 +269,11 @@ fn test_write_list() {
 fn test_write_object() {
     test_encode_ok(&[
         (treemap!(), "{}"),
-        (treemap!("a".to_string() => true), "{\"a\":true}"),
+        (treemap!("a".to_owned() => true), "{\"a\":true}"),
         (
             treemap!(
-                "a".to_string() => true,
-                "b".to_string() => false,
+                "a".to_owned() => true,
+                "b".to_owned() => false,
             ),
             "{\"a\":true,\"b\":false}",
         ),
@@ -285,44 +282,44 @@ fn test_write_object() {
     test_encode_ok(&[
         (
             treemap![
-                "a".to_string() => treemap![],
-                "b".to_string() => treemap![],
-                "c".to_string() => treemap![],
+                "a".to_owned() => treemap![],
+                "b".to_owned() => treemap![],
+                "c".to_owned() => treemap![],
             ],
             "{\"a\":{},\"b\":{},\"c\":{}}",
         ),
         (
             treemap![
-                "a".to_string() => treemap![
-                    "a".to_string() => treemap!["a" => vec![1,2,3]],
-                    "b".to_string() => treemap![],
-                    "c".to_string() => treemap![],
+                "a".to_owned() => treemap![
+                    "a".to_owned() => treemap!["a" => vec![1,2,3]],
+                    "b".to_owned() => treemap![],
+                    "c".to_owned() => treemap![],
                 ],
-                "b".to_string() => treemap![],
-                "c".to_string() => treemap![],
+                "b".to_owned() => treemap![],
+                "c".to_owned() => treemap![],
             ],
             "{\"a\":{\"a\":{\"a\":[1,2,3]},\"b\":{},\"c\":{}},\"b\":{},\"c\":{}}",
         ),
         (
             treemap![
-                "a".to_string() => treemap![],
-                "b".to_string() => treemap![
-                    "a".to_string() => treemap!["a" => vec![1,2,3]],
-                    "b".to_string() => treemap![],
-                    "c".to_string() => treemap![],
+                "a".to_owned() => treemap![],
+                "b".to_owned() => treemap![
+                    "a".to_owned() => treemap!["a" => vec![1,2,3]],
+                    "b".to_owned() => treemap![],
+                    "c".to_owned() => treemap![],
                 ],
-                "c".to_string() => treemap![],
+                "c".to_owned() => treemap![],
             ],
             "{\"a\":{},\"b\":{\"a\":{\"a\":[1,2,3]},\"b\":{},\"c\":{}},\"c\":{}}",
         ),
         (
             treemap![
-                "a".to_string() => treemap![],
-                "b".to_string() => treemap![],
-                "c".to_string() => treemap![
-                    "a".to_string() => treemap!["a" => vec![1,2,3]],
-                    "b".to_string() => treemap![],
-                    "c".to_string() => treemap![],
+                "a".to_owned() => treemap![],
+                "b".to_owned() => treemap![],
+                "c".to_owned() => treemap![
+                    "a".to_owned() => treemap!["a" => vec![1,2,3]],
+                    "b".to_owned() => treemap![],
+                    "c".to_owned() => treemap![],
                 ],
             ],
             "{\"a\":{},\"b\":{},\"c\":{\"a\":{\"a\":[1,2,3]},\"b\":{},\"c\":{}}}",
@@ -334,9 +331,9 @@ fn test_write_object() {
     test_pretty_encode_ok(&[
         (
             treemap![
-                "a".to_string() => treemap![],
-                "b".to_string() => treemap![],
-                "c".to_string() => treemap![],
+                "a".to_owned() => treemap![],
+                "b".to_owned() => treemap![],
+                "c".to_owned() => treemap![],
             ],
             pretty_str!({
                 "a": {},
@@ -346,13 +343,13 @@ fn test_write_object() {
         ),
         (
             treemap![
-                "a".to_string() => treemap![
-                    "a".to_string() => treemap!["a" => vec![1,2,3]],
-                    "b".to_string() => treemap![],
-                    "c".to_string() => treemap![],
+                "a".to_owned() => treemap![
+                    "a".to_owned() => treemap!["a" => vec![1,2,3]],
+                    "b".to_owned() => treemap![],
+                    "c".to_owned() => treemap![],
                 ],
-                "b".to_string() => treemap![],
-                "c".to_string() => treemap![],
+                "b".to_owned() => treemap![],
+                "c".to_owned() => treemap![],
             ],
             pretty_str!({
                 "a": {
@@ -372,13 +369,13 @@ fn test_write_object() {
         ),
         (
             treemap![
-                "a".to_string() => treemap![],
-                "b".to_string() => treemap![
-                    "a".to_string() => treemap!["a" => vec![1,2,3]],
-                    "b".to_string() => treemap![],
-                    "c".to_string() => treemap![],
+                "a".to_owned() => treemap![],
+                "b".to_owned() => treemap![
+                    "a".to_owned() => treemap!["a" => vec![1,2,3]],
+                    "b".to_owned() => treemap![],
+                    "c".to_owned() => treemap![],
                 ],
-                "c".to_string() => treemap![],
+                "c".to_owned() => treemap![],
             ],
             pretty_str!({
                 "a": {},
@@ -398,12 +395,12 @@ fn test_write_object() {
         ),
         (
             treemap![
-                "a".to_string() => treemap![],
-                "b".to_string() => treemap![],
-                "c".to_string() => treemap![
-                    "a".to_string() => treemap!["a" => vec![1,2,3]],
-                    "b".to_string() => treemap![],
-                    "c".to_string() => treemap![],
+                "a".to_owned() => treemap![],
+                "b".to_owned() => treemap![],
+                "c".to_owned() => treemap![
+                    "a".to_owned() => treemap!["a" => vec![1,2,3]],
+                    "b".to_owned() => treemap![],
+                    "c".to_owned() => treemap![],
                 ],
             ],
             pretty_str!({
@@ -427,15 +424,15 @@ fn test_write_object() {
     test_pretty_encode_ok(&[
         (treemap!(), "{}"),
         (
-            treemap!("a".to_string() => true),
+            treemap!("a".to_owned() => true),
             pretty_str!({
                 "a": true
             }),
         ),
         (
             treemap!(
-                "a".to_string() => true,
-                "b".to_string() => false,
+                "a".to_owned() => true,
+                "b".to_owned() => false,
             ),
             pretty_str!( {
                 "a": true,
@@ -496,26 +493,26 @@ fn test_write_enum() {
     test_encode_ok(&[
         (Animal::Dog, "\"Dog\""),
         (
-            Animal::Frog("Henry".to_string(), vec![]),
+            Animal::Frog("Henry".to_owned(), vec![]),
             "{\"Frog\":[\"Henry\",[]]}",
         ),
         (
-            Animal::Frog("Henry".to_string(), vec![349]),
+            Animal::Frog("Henry".to_owned(), vec![349]),
             "{\"Frog\":[\"Henry\",[349]]}",
         ),
         (
-            Animal::Frog("Henry".to_string(), vec![349, 102]),
+            Animal::Frog("Henry".to_owned(), vec![349, 102]),
             "{\"Frog\":[\"Henry\",[349,102]]}",
         ),
         (
             Animal::Cat {
                 age: 5,
-                name: "Kate".to_string(),
+                name: "Kate".to_owned(),
             },
             "{\"Cat\":{\"age\":5,\"name\":\"Kate\"}}",
         ),
         (
-            Animal::AntHive(vec!["Bob".to_string(), "Stuart".to_string()]),
+            Animal::AntHive(vec!["Bob".to_owned(), "Stuart".to_owned()]),
             "{\"AntHive\":[\"Bob\",\"Stuart\"]}",
         ),
     ]);
@@ -523,7 +520,7 @@ fn test_write_enum() {
     test_pretty_encode_ok(&[
         (Animal::Dog, "\"Dog\""),
         (
-            Animal::Frog("Henry".to_string(), vec![]),
+            Animal::Frog("Henry".to_owned(), vec![]),
             pretty_str!({
                 "Frog": [
                     "Henry",
@@ -532,7 +529,7 @@ fn test_write_enum() {
             }),
         ),
         (
-            Animal::Frog("Henry".to_string(), vec![349]),
+            Animal::Frog("Henry".to_owned(), vec![349]),
             pretty_str!({
                 "Frog": [
                     "Henry",
@@ -543,7 +540,7 @@ fn test_write_enum() {
             }),
         ),
         (
-            Animal::Frog("Henry".to_string(), vec![349, 102]),
+            Animal::Frog("Henry".to_owned(), vec![349, 102]),
             pretty_str!({
                 "Frog": [
                     "Henry",
@@ -1094,15 +1091,15 @@ fn test_parse_string() {
         ),
         (
             &[b'"', b'\\', b'u', 250, 48, 51, 48, b'"'],
-            "invalid escape at line 1 column 4",
+            "invalid escape at line 1 column 7",
         ),
         (
             &[b'"', b'\\', b'u', 48, 250, 51, 48, b'"'],
-            "invalid escape at line 1 column 5",
+            "invalid escape at line 1 column 7",
         ),
         (
             &[b'"', b'\\', b'u', 48, 48, 250, 48, b'"'],
-            "invalid escape at line 1 column 6",
+            "invalid escape at line 1 column 7",
         ),
         (
             &[b'"', b'\\', b'u', 48, 48, 51, 250, b'"'],
@@ -1120,16 +1117,16 @@ fn test_parse_string() {
 
     test_parse_ok(vec![
         ("\"\"", String::new()),
-        ("\"foo\"", "foo".to_string()),
-        (" \"foo\" ", "foo".to_string()),
-        ("\"\\\"\"", "\"".to_string()),
-        ("\"\\b\"", "\x08".to_string()),
-        ("\"\\n\"", "\n".to_string()),
-        ("\"\\r\"", "\r".to_string()),
-        ("\"\\t\"", "\t".to_string()),
-        ("\"\\u12ab\"", "\u{12ab}".to_string()),
-        ("\"\\uAB12\"", "\u{AB12}".to_string()),
-        ("\"\\uD83C\\uDF95\"", "\u{1F395}".to_string()),
+        ("\"foo\"", "foo".to_owned()),
+        (" \"foo\" ", "foo".to_owned()),
+        ("\"\\\"\"", "\"".to_owned()),
+        ("\"\\b\"", "\x08".to_owned()),
+        ("\"\\n\"", "\n".to_owned()),
+        ("\"\\r\"", "\r".to_owned()),
+        ("\"\\t\"", "\t".to_owned()),
+        ("\"\\u12ab\"", "\u{12ab}".to_owned()),
+        ("\"\\uAB12\"", "\u{AB12}".to_owned()),
+        ("\"\\uD83C\\uDF95\"", "\u{1F395}".to_owned()),
     ]);
 }
 
@@ -1187,24 +1184,24 @@ fn test_parse_object() {
     test_parse_ok(vec![
         ("{}", treemap!()),
         ("{ }", treemap!()),
-        ("{\"a\":3}", treemap!("a".to_string() => 3u64)),
-        ("{ \"a\" : 3 }", treemap!("a".to_string() => 3)),
+        ("{\"a\":3}", treemap!("a".to_owned() => 3u64)),
+        ("{ \"a\" : 3 }", treemap!("a".to_owned() => 3)),
         (
             "{\"a\":3,\"b\":4}",
-            treemap!("a".to_string() => 3, "b".to_string() => 4),
+            treemap!("a".to_owned() => 3, "b".to_owned() => 4),
         ),
         (
             " { \"a\" : 3 , \"b\" : 4 } ",
-            treemap!("a".to_string() => 3, "b".to_string() => 4),
+            treemap!("a".to_owned() => 3, "b".to_owned() => 4),
         ),
     ]);
 
     test_parse_ok(vec![(
         "{\"a\": {\"b\": 3, \"c\": 4}}",
         treemap!(
-            "a".to_string() => treemap!(
-                "b".to_string() => 3u64,
-                "c".to_string() => 4,
+            "a".to_owned() => treemap!(
+                "b".to_owned() => 3u64,
+                "c".to_owned() => 4,
             ),
         ),
     )]);
@@ -1251,7 +1248,7 @@ fn test_parse_struct() {
                 inner: vec![Inner {
                     a: (),
                     b: 2,
-                    c: vec!["abc".to_string(), "xyz".to_string()],
+                    c: vec!["abc".to_owned(), "xyz".to_owned()],
                 }],
             },
         ),
@@ -1272,7 +1269,7 @@ fn test_parse_struct() {
             inner: vec![Inner {
                 a: (),
                 b: 2,
-                c: vec!["abc".to_string(), "xyz".to_string()],
+                c: vec!["abc".to_owned(), "xyz".to_owned()],
             }],
         }
     );
@@ -1286,7 +1283,7 @@ fn test_parse_struct() {
 fn test_parse_option() {
     test_parse_ok(vec![
         ("null", None::<String>),
-        ("\"jodhpurs\"", Some("jodhpurs".to_string())),
+        ("\"jodhpurs\"", Some("jodhpurs".to_owned())),
     ]);
 
     #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1341,29 +1338,29 @@ fn test_parse_enum() {
         (" \"Dog\" ", Animal::Dog),
         (
             "{\"Frog\":[\"Henry\",[]]}",
-            Animal::Frog("Henry".to_string(), vec![]),
+            Animal::Frog("Henry".to_owned(), vec![]),
         ),
         (
             " { \"Frog\": [ \"Henry\" , [ 349, 102 ] ] } ",
-            Animal::Frog("Henry".to_string(), vec![349, 102]),
+            Animal::Frog("Henry".to_owned(), vec![349, 102]),
         ),
         (
             "{\"Cat\": {\"age\": 5, \"name\": \"Kate\"}}",
             Animal::Cat {
                 age: 5,
-                name: "Kate".to_string(),
+                name: "Kate".to_owned(),
             },
         ),
         (
             " { \"Cat\" : { \"age\" : 5 , \"name\" : \"Kate\" } } ",
             Animal::Cat {
                 age: 5,
-                name: "Kate".to_string(),
+                name: "Kate".to_owned(),
             },
         ),
         (
             " { \"AntHive\" : [\"Bob\", \"Stuart\"] } ",
-            Animal::AntHive(vec!["Bob".to_string(), "Stuart".to_string()]),
+            Animal::AntHive(vec!["Bob".to_owned(), "Stuart".to_owned()]),
         ),
     ]);
 
@@ -1380,8 +1377,8 @@ fn test_parse_enum() {
             "}"
         ),
         treemap!(
-            "a".to_string() => Animal::Dog,
-            "b".to_string() => Animal::Frog("Henry".to_string(), vec![]),
+            "a".to_owned() => Animal::Dog,
+            "b".to_owned() => Animal::Frog("Henry".to_owned(), vec![]),
         ),
     )]);
 }
@@ -1656,7 +1653,7 @@ fn test_deserialize_from_stream() {
 
     let mut stream = TcpStream::connect("localhost:20000").unwrap();
     let request = Message {
-        message: "hi there".to_string(),
+        message: "hi there".to_owned(),
     };
     to_writer(&mut stream, &request).unwrap();
 
@@ -1682,20 +1679,20 @@ fn test_serialize_rejects_adt_keys() {
 fn test_bytes_ser() {
     let buf = vec![];
     let bytes = Bytes::new(&buf);
-    assert_eq!(to_string(&bytes).unwrap(), "[]".to_string());
+    assert_eq!(to_string(&bytes).unwrap(), "[]".to_owned());
 
     let buf = vec![1, 2, 3];
     let bytes = Bytes::new(&buf);
-    assert_eq!(to_string(&bytes).unwrap(), "[1,2,3]".to_string());
+    assert_eq!(to_string(&bytes).unwrap(), "[1,2,3]".to_owned());
 }
 
 #[test]
 fn test_byte_buf_ser() {
     let bytes = ByteBuf::new();
-    assert_eq!(to_string(&bytes).unwrap(), "[]".to_string());
+    assert_eq!(to_string(&bytes).unwrap(), "[]".to_owned());
 
     let bytes = ByteBuf::from(vec![1, 2, 3]);
-    assert_eq!(to_string(&bytes).unwrap(), "[1,2,3]".to_string());
+    assert_eq!(to_string(&bytes).unwrap(), "[1,2,3]".to_owned());
 }
 
 #[test]
@@ -1710,7 +1707,7 @@ fn test_byte_buf_de() {
 }
 
 #[test]
-fn test_byte_buf_de_lone_surrogate() {
+fn test_byte_buf_de_invalid_surrogates() {
     let bytes = ByteBuf::from(vec![237, 160, 188]);
     let v: ByteBuf = from_str(r#""\ud83c""#).unwrap();
     assert_eq!(v, bytes);
@@ -1723,23 +1720,54 @@ fn test_byte_buf_de_lone_surrogate() {
     let v: ByteBuf = from_str(r#""\ud83c ""#).unwrap();
     assert_eq!(v, bytes);
 
-    let bytes = ByteBuf::from(vec![237, 176, 129]);
-    let v: ByteBuf = from_str(r#""\udc01""#).unwrap();
-    assert_eq!(v, bytes);
-
     let res = from_str::<ByteBuf>(r#""\ud83c\!""#);
     assert!(res.is_err());
 
     let res = from_str::<ByteBuf>(r#""\ud83c\u""#);
     assert!(res.is_err());
 
-    let res = from_str::<ByteBuf>(r#""\ud83c\ud83c""#);
-    assert!(res.is_err());
+    // lone trailing surrogate
+    let bytes = ByteBuf::from(vec![237, 176, 129]);
+    let v: ByteBuf = from_str(r#""\udc01""#).unwrap();
+    assert_eq!(v, bytes);
+
+    // leading surrogate followed by other leading surrogate
+    let bytes = ByteBuf::from(vec![237, 160, 188, 237, 160, 188]);
+    let v: ByteBuf = from_str(r#""\ud83c\ud83c""#).unwrap();
+    assert_eq!(v, bytes);
+
+    // leading surrogate followed by "a" (U+0061) in \u encoding
+    let bytes = ByteBuf::from(vec![237, 160, 188, 97]);
+    let v: ByteBuf = from_str(r#""\ud83c\u0061""#).unwrap();
+    assert_eq!(v, bytes);
+
+    // leading surrogate followed by U+0080
+    let bytes = ByteBuf::from(vec![237, 160, 188, 194, 128]);
+    let v: ByteBuf = from_str(r#""\ud83c\u0080""#).unwrap();
+    assert_eq!(v, bytes);
+
+    // leading surrogate followed by U+FFFF
+    let bytes = ByteBuf::from(vec![237, 160, 188, 239, 191, 191]);
+    let v: ByteBuf = from_str(r#""\ud83c\uffff""#).unwrap();
+    assert_eq!(v, bytes);
+}
+
+#[test]
+fn test_byte_buf_de_surrogate_pair() {
+    // leading surrogate followed by trailing surrogate
+    let bytes = ByteBuf::from(vec![240, 159, 128, 128]);
+    let v: ByteBuf = from_str(r#""\ud83c\udc00""#).unwrap();
+    assert_eq!(v, bytes);
+
+    // leading surrogate followed by a surrogate pair
+    let bytes = ByteBuf::from(vec![237, 160, 188, 240, 159, 128, 128]);
+    let v: ByteBuf = from_str(r#""\ud83c\ud83c\udc00""#).unwrap();
+    assert_eq!(v, bytes);
 }
 
 #[cfg(feature = "raw_value")]
 #[test]
-fn test_raw_de_lone_surrogate() {
+fn test_raw_de_invalid_surrogates() {
     use serde_json::value::RawValue;
 
     assert!(from_str::<Box<RawValue>>(r#""\ud83c""#).is_ok());
@@ -1749,6 +1777,17 @@ fn test_raw_de_lone_surrogate() {
     assert!(from_str::<Box<RawValue>>(r#""\udc01\!""#).is_err());
     assert!(from_str::<Box<RawValue>>(r#""\udc01\u""#).is_err());
     assert!(from_str::<Box<RawValue>>(r#""\ud83c\ud83c""#).is_ok());
+    assert!(from_str::<Box<RawValue>>(r#""\ud83c\u0061""#).is_ok());
+    assert!(from_str::<Box<RawValue>>(r#""\ud83c\u0080""#).is_ok());
+    assert!(from_str::<Box<RawValue>>(r#""\ud83c\uffff""#).is_ok());
+}
+
+#[cfg(feature = "raw_value")]
+#[test]
+fn test_raw_de_surrogate_pair() {
+    use serde_json::value::RawValue;
+
+    assert!(from_str::<Box<RawValue>>(r#""\ud83c\udc00""#).is_ok());
 }
 
 #[test]
@@ -2104,20 +2143,20 @@ fn issue_220() {
     assert_eq!(from_str::<E>(r#"{"V": 0}"#).unwrap(), E::V(0));
 }
 
-macro_rules! number_partialeq_ok {
-    ($($n:expr)*) => {
-        $(
-            let value = to_value($n).unwrap();
-            let s = $n.to_string();
-            assert_eq!(value, $n);
-            assert_eq!($n, value);
-            assert_ne!(value, s);
-        )*
-    }
-}
-
 #[test]
 fn test_partialeq_number() {
+    macro_rules! number_partialeq_ok {
+        ($($n:expr)*) => {
+            $(
+                let value = to_value($n).unwrap();
+                let s = $n.to_string();
+                assert_eq!(value, $n);
+                assert_eq!($n, value);
+                assert_ne!(value, s);
+            )*
+        };
+    }
+
     number_partialeq_ok!(0 1 100
         i8::MIN i8::MAX i16::MIN i16::MAX i32::MIN i32::MAX i64::MIN i64::MAX
         u8::MIN u8::MAX u16::MIN u16::MAX u32::MIN u32::MAX u64::MIN u64::MAX
@@ -2126,13 +2165,6 @@ fn test_partialeq_number() {
         f32::consts::E f32::consts::PI f32::consts::LN_2 f32::consts::LOG2_E
         f64::consts::E f64::consts::PI f64::consts::LN_2 f64::consts::LOG2_E
     );
-}
-
-#[test]
-#[cfg(integer128)]
-#[cfg(feature = "arbitrary_precision")]
-fn test_partialeq_integer128() {
-    number_partialeq_ok!(i128::MIN i128::MAX u128::MIN u128::MAX)
 }
 
 #[test]
@@ -2242,8 +2274,8 @@ fn null_invalid_type() {
 
 #[test]
 fn test_integer128() {
-    let signed = &[i128::min_value(), -1, 0, 1, i128::max_value()];
-    let unsigned = &[0, 1, u128::max_value()];
+    let signed = &[i128::MIN, -1, 0, 1, i128::MAX];
+    let unsigned = &[0, 1, u128::MAX];
 
     for integer128 in signed {
         let expected = integer128.to_string();
@@ -2279,8 +2311,8 @@ fn test_integer128() {
 
 #[test]
 fn test_integer128_to_value() {
-    let signed = &[i128::from(i64::min_value()), i128::from(u64::max_value())];
-    let unsigned = &[0, u128::from(u64::max_value())];
+    let signed = &[i128::from(i64::MIN), i128::from(u64::MAX)];
+    let unsigned = &[0, u128::from(u64::MAX)];
 
     for integer128 in signed {
         let expected = integer128.to_string();
@@ -2293,7 +2325,7 @@ fn test_integer128_to_value() {
     }
 
     if !cfg!(feature = "arbitrary_precision") {
-        let err = to_value(u128::from(u64::max_value()) + 1).unwrap_err();
+        let err = to_value(u128::from(u64::MAX) + 1).unwrap_err();
         assert_eq!(err.to_string(), "number out of range");
     }
 }
@@ -2322,9 +2354,9 @@ fn test_borrowed_raw_value() {
     let array_from_str: Vec<&RawValue> =
         serde_json::from_str(r#"["a", 42, {"foo": "bar"}, null]"#).unwrap();
     assert_eq!(r#""a""#, array_from_str[0].get());
-    assert_eq!(r#"42"#, array_from_str[1].get());
+    assert_eq!("42", array_from_str[1].get());
     assert_eq!(r#"{"foo": "bar"}"#, array_from_str[2].get());
-    assert_eq!(r#"null"#, array_from_str[3].get());
+    assert_eq!("null", array_from_str[3].get());
 
     let array_to_string = serde_json::to_string(&array_from_str).unwrap();
     assert_eq!(r#"["a",42,{"foo": "bar"},null]"#, array_to_string);
@@ -2337,6 +2369,8 @@ fn test_raw_value_in_map_key() {
     #[repr(transparent)]
     struct RawMapKey(RawValue);
 
+    #[allow(unknown_lints)]
+    #[allow(non_local_definitions)] // false positive: https://github.com/rust-lang/rust/issues/121621
     impl<'de> Deserialize<'de> for &'de RawMapKey {
         fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
         where
@@ -2399,16 +2433,16 @@ fn test_boxed_raw_value() {
     let array_from_str: Vec<Box<RawValue>> =
         serde_json::from_str(r#"["a", 42, {"foo": "bar"}, null]"#).unwrap();
     assert_eq!(r#""a""#, array_from_str[0].get());
-    assert_eq!(r#"42"#, array_from_str[1].get());
+    assert_eq!("42", array_from_str[1].get());
     assert_eq!(r#"{"foo": "bar"}"#, array_from_str[2].get());
-    assert_eq!(r#"null"#, array_from_str[3].get());
+    assert_eq!("null", array_from_str[3].get());
 
     let array_from_reader: Vec<Box<RawValue>> =
         serde_json::from_reader(br#"["a", 42, {"foo": "bar"}, null]"#.as_ref()).unwrap();
     assert_eq!(r#""a""#, array_from_reader[0].get());
-    assert_eq!(r#"42"#, array_from_reader[1].get());
+    assert_eq!("42", array_from_reader[1].get());
     assert_eq!(r#"{"foo": "bar"}"#, array_from_reader[2].get());
-    assert_eq!(r#"null"#, array_from_reader[3].get());
+    assert_eq!("null", array_from_reader[3].get());
 
     let array_to_string = serde_json::to_string(&array_from_str).unwrap();
     assert_eq!(r#"["a",42,{"foo": "bar"},null]"#, array_to_string);
@@ -2493,19 +2527,34 @@ fn test_value_into_deserializer() {
 
 #[test]
 fn hash_positive_and_negative_zero() {
-    fn hash(obj: impl Hash) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        obj.hash(&mut hasher);
-        hasher.finish()
-    }
+    let rand = std::hash::RandomState::new();
 
     let k1 = serde_json::from_str::<Number>("0.0").unwrap();
     let k2 = serde_json::from_str::<Number>("-0.0").unwrap();
     if cfg!(feature = "arbitrary_precision") {
         assert_ne!(k1, k2);
-        assert_ne!(hash(k1), hash(k2));
+        assert_ne!(rand.hash_one(k1), rand.hash_one(k2));
     } else {
         assert_eq!(k1, k2);
-        assert_eq!(hash(k1), hash(k2));
+        assert_eq!(rand.hash_one(k1), rand.hash_one(k2));
     }
+}
+
+#[test]
+fn test_control_character_search() {
+    // Different space circumstances
+    for n in 0..16 {
+        for m in 0..16 {
+            test_parse_err::<String>(&[(
+                &format!("\"{}\n{}\"", " ".repeat(n), " ".repeat(m)),
+                "control character (\\u0000-\\u001F) found while parsing a string at line 2 column 0",
+            )]);
+        }
+    }
+
+    // Multiple occurrences
+    test_parse_err::<String>(&[(
+        "\"\t\n\r\"",
+        "control character (\\u0000-\\u001F) found while parsing a string at line 1 column 2",
+    )]);
 }

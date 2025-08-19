@@ -60,7 +60,7 @@ fn test_random() {
 }
 
 #[test]
-#[cfg_attr(miri, ignore)]
+#[cfg_attr(miri, ignore = "too slow for miri")]
 fn test_non_finite() {
     for i in 0u32..1 << 23 {
         let f = f32::from_bits((((1 << 8) - 1) << 23) + i);
@@ -75,7 +75,8 @@ fn test_basic() {
     check!(-0.0);
     check!(1.0);
     check!(-1.0);
-    assert_eq!(pretty(f32::NAN), "NaN");
+    assert_eq!(pretty(f32::NAN.copysign(1.0)), "NaN");
+    assert_eq!(pretty(f32::NAN.copysign(-1.0)), "NaN");
     assert_eq!(pretty(f32::INFINITY), "inf");
     assert_eq!(pretty(f32::NEG_INFINITY), "-inf");
 }

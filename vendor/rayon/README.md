@@ -2,9 +2,8 @@
 
 [![Rayon crate](https://img.shields.io/crates/v/rayon.svg)](https://crates.io/crates/rayon)
 [![Rayon documentation](https://docs.rs/rayon/badge.svg)](https://docs.rs/rayon)
-![minimum rustc 1.63](https://img.shields.io/badge/rustc-1.63+-red.svg)
-[![build status](https://github.com/rayon-rs/rayon/workflows/master/badge.svg)](https://github.com/rayon-rs/rayon/actions)
-[![Join the chat at https://gitter.im/rayon-rs/Lobby](https://badges.gitter.im/rayon-rs/Lobby.svg)](https://gitter.im/rayon-rs/Lobby?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
+![minimum rustc 1.80](https://img.shields.io/badge/rustc-1.80+-red.svg)
+[![build status](https://github.com/rayon-rs/rayon/workflows/main/badge.svg)](https://github.com/rayon-rs/rayon/actions)
 
 Rayon is a data-parallelism library for Rust. It is extremely
 lightweight and makes it easy to convert a sequential computation into
@@ -37,13 +36,13 @@ fn sum_of_squares(input: &[i32]) -> i32 {
 into tasks; it will dynamically adapt for maximum performance. If you
 need more flexibility than that, Rayon also offers the [join] and
 [scope] functions, which let you create parallel tasks on your own.
-For even more control, you can create [custom threadpools] rather than
-using Rayon's default, global threadpool.
+For even more control, you can create [custom thread pools] rather than
+using Rayon's default, global thread pool.
 
 [Parallel iterators]: https://docs.rs/rayon/*/rayon/iter/index.html
 [join]: https://docs.rs/rayon/*/rayon/fn.join.html
 [scope]: https://docs.rs/rayon/*/rayon/fn.scope.html
-[custom threadpools]: https://docs.rs/rayon/*/rayon/struct.ThreadPool.html
+[custom thread pools]: https://docs.rs/rayon/*/rayon/struct.ThreadPool.html
 
 ## No data races
 
@@ -71,7 +70,7 @@ as:
 
 ```toml
 [dependencies]
-rayon = "1.7"
+rayon = "1.11"
 ```
 
 To use the parallel iterator APIs, a number of traits have to be in
@@ -84,16 +83,23 @@ just add:
 use rayon::prelude::*;
 ```
 
-Rayon currently requires `rustc 1.63.0` or greater.
+Rayon currently requires `rustc 1.80.0` or greater.
 
 ### Usage with WebAssembly
 
-Rayon can work on the Web via WebAssembly, but requires an adapter and
-some project configuration to account for differences between
-WebAssembly threads and threads on the other platforms.
+By default, when building to WebAssembly, Rayon will treat it as any
+other platform without multithreading support and will fall back to
+sequential iteration. This allows existing code to compile and run
+successfully with no changes necessary, but it will run slower as it
+will only use a single CPU core.
+
+You can build Rayon-based projects with proper multithreading support
+for the Web, but you'll need an adapter and some project configuration
+to account for differences between WebAssembly threads and threads on
+the other platforms.
 
 Check out the
-[wasm-bindgen-rayon](https://github.com/GoogleChromeLabs/wasm-bindgen-rayon)
+[wasm-bindgen-rayon](https://github.com/RReverser/wasm-bindgen-rayon)
 docs for more details.
 
 ## Contribution
@@ -108,7 +114,7 @@ out the
 [Guide to Development](https://github.com/rayon-rs/rayon/wiki/Guide-to-Development)
 page on the wiki. Note that all code submitted in PRs to Rayon is
 assumed to
-[be licensed under Rayon's dual MIT/Apache 2.0 licensing](https://github.com/rayon-rs/rayon/blob/master/README.md#license).
+[be licensed under Rayon's dual MIT/Apache 2.0 licensing](https://github.com/rayon-rs/rayon/blob/main/README.md#license).
 
 ## Quick demo
 
@@ -134,7 +140,7 @@ For more information on demos, try:
 
 See [the Rayon FAQ][faq].
 
-[faq]: https://github.com/rayon-rs/rayon/blob/master/FAQ.md
+[faq]: https://github.com/rayon-rs/rayon/blob/main/FAQ.md
 
 ## License
 

@@ -4,7 +4,7 @@
 //! defines two traits, [`AsyncRead`] and [`AsyncWrite`], which are asynchronous
 //! versions of the [`Read`] and [`Write`] traits in the standard library.
 //!
-//! # AsyncRead and AsyncWrite
+//! # `AsyncRead` and `AsyncWrite`
 //!
 //! Like the standard library's [`Read`] and [`Write`] traits, [`AsyncRead`] and
 //! [`AsyncWrite`] provide the most general interface for reading and writing
@@ -122,7 +122,7 @@
 //! [`BufReader`]: crate::io::BufReader
 //! [`BufWriter`]: crate::io::BufWriter
 //!
-//! ## Implementing AsyncRead and AsyncWrite
+//! ## Implementing `AsyncRead` and `AsyncWrite`
 //!
 //! Because they are traits, we can implement [`AsyncRead`] and [`AsyncWrite`] for
 //! our own types, as well. Note that these traits must only be implemented for
@@ -218,7 +218,7 @@ cfg_io_driver_impl! {
     pub(crate) mod interest;
     pub(crate) mod ready;
 
-    cfg_net! {
+    cfg_net_or_uring! {
         pub use interest::Interest;
         pub use ready::Ready;
     }
@@ -231,6 +231,9 @@ cfg_io_driver_impl! {
     pub(crate) use poll_evented::PollEvented;
 }
 
+// The bsd module can't be build on Windows, so we completely ignore it, even
+// when building documentation.
+#[cfg(unix)]
 cfg_aio! {
     /// BSD-specific I/O types.
     pub mod bsd {
@@ -245,7 +248,7 @@ cfg_net_unix! {
 
     pub mod unix {
         //! Asynchronous IO structures specific to Unix-like operating systems.
-        pub use super::async_fd::{AsyncFd, AsyncFdReadyGuard, AsyncFdReadyMutGuard, TryIoError};
+        pub use super::async_fd::{AsyncFd, AsyncFdTryNewError, AsyncFdReadyGuard, AsyncFdReadyMutGuard, TryIoError};
     }
 }
 
@@ -265,12 +268,14 @@ cfg_io_std! {
 cfg_io_util! {
     mod split;
     pub use split::{split, ReadHalf, WriteHalf};
+    mod join;
+    pub use join::{join, Join};
 
     pub(crate) mod seek;
     pub(crate) mod util;
     pub use util::{
-        copy, copy_bidirectional, copy_buf, duplex, empty, repeat, sink, AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt,
-        BufReader, BufStream, BufWriter, DuplexStream, Empty, Lines, Repeat, Sink, Split, Take,
+        copy, copy_bidirectional, copy_bidirectional_with_sizes, copy_buf, duplex, empty, repeat, sink, simplex, AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt,
+        BufReader, BufStream, BufWriter, DuplexStream, Empty, Lines, Repeat, Sink, Split, Take, SimplexStream,
     };
 }
 

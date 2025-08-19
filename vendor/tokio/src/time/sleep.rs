@@ -6,7 +6,7 @@ use pin_project_lite::pin_project;
 use std::future::Future;
 use std::panic::Location;
 use std::pin::Pin;
-use std::task::{self, Poll};
+use std::task::{self, ready, Poll};
 
 /// Waits until `deadline` is reached.
 ///
@@ -60,7 +60,7 @@ use std::task::{self, Poll};
 #[cfg_attr(docsrs, doc(alias = "delay_until"))]
 #[track_caller]
 pub fn sleep_until(deadline: Instant) -> Sleep {
-    return Sleep::new_timeout(deadline, trace::caller_location());
+    Sleep::new_timeout(deadline, trace::caller_location())
 }
 
 /// Waits until `duration` has elapsed.
@@ -75,8 +75,6 @@ pub fn sleep_until(deadline: Instant) -> Sleep {
 /// larger resolution than 1 ms.
 ///
 /// To run something regularly on a schedule, see [`interval`].
-///
-/// The maximum duration for a sleep is 68719476734 milliseconds (approximately 2.2 years).
 ///
 /// # Cancellation
 ///
@@ -219,8 +217,8 @@ pin_project! {
     ///
     /// [`select!`]: ../macro.select.html
     /// [`tokio::pin!`]: ../macro.pin.html
-    // Alias for old name in 0.2
     #[project(!Unpin)]
+    // Alias for old name in 0.2
     #[cfg_attr(docsrs, doc(alias = "Delay"))]
     #[derive(Debug)]
     #[must_use = "futures do nothing unless you `.await` or poll them"]
@@ -254,12 +252,11 @@ impl Sleep {
         location: Option<&'static Location<'static>>,
     ) -> Sleep {
         use crate::runtime::scheduler;
-
         let handle = scheduler::Handle::current();
-        let entry = TimerEntry::new(&handle, deadline);
-
+        let entry = TimerEntry::new(handle, deadline);
         #[cfg(all(tokio_unstable, feature = "tracing"))]
         let inner = {
+            let handle = scheduler::Handle::current();
             let clock = handle.driver().clock();
             let handle = &handle.driver().time();
             let time_source = handle.time_source();
@@ -268,6 +265,7 @@ impl Sleep {
 
             let location = location.expect("should have location if tracing");
             let resource_span = tracing::trace_span!(
+                parent: None,
                 "runtime.resource",
                 concrete_type = "Sleep",
                 kind = "timer",
@@ -351,7 +349,7 @@ impl Sleep {
     ///
     /// [`Pin::as_mut`]: fn@std::pin::Pin::as_mut
     pub fn reset(self: Pin<&mut Self>, deadline: Instant) {
-        self.reset_inner(deadline)
+        self.reset_inner(deadline);
     }
 
     /// Resets the `Sleep` instance to a new deadline without reregistering it
@@ -360,7 +358,7 @@ impl Sleep {
     /// Calling this function allows changing the instant at which the `Sleep`
     /// future completes without having to create new associated state and
     /// without having it registered. This is required in e.g. the
-    /// [crate::time::Interval] where we want to reset the internal [Sleep]
+    /// [`crate::time::Interval`] where we want to reset the internal [Sleep]
     /// without having it wake up the last task that polled it.
     pub(crate) fn reset_without_reregister(self: Pin<&mut Self>, deadline: Instant) {
         let mut me = self.project();
@@ -407,11 +405,11 @@ impl Sleep {
         #[cfg(all(tokio_unstable, feature = "tracing"))]
         let coop = ready!(trace_poll_op!(
             "poll_elapsed",
-            crate::runtime::coop::poll_proceed(cx),
+            crate::task::coop::poll_proceed(cx),
         ));
 
         #[cfg(any(not(tokio_unstable), not(feature = "tracing")))]
-        let coop = ready!(crate::runtime::coop::poll_proceed(cx));
+        let coop = ready!(crate::task::coop::poll_proceed(cx));
 
         let result = me.entry.poll_elapsed(cx).map(move |r| {
             coop.made_progress();
@@ -447,7 +445,7 @@ impl Future for Sleep {
         let _ao_poll_span = self.inner.ctx.async_op_poll_span.clone().entered();
         match ready!(self.as_mut().poll_elapsed(cx)) {
             Ok(()) => Poll::Ready(()),
-            Err(e) => panic!("timer error: {}", e),
+            Err(e) => panic!("timer error: {e}"),
         }
     }
 }

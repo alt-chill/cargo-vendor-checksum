@@ -49,10 +49,10 @@
 //!   collection to extend, you can use [`collect()`] to create a new
 //!   one from scratch.)
 //!
-//! [the `ParallelSlice` trait]: ../slice/trait.ParallelSlice.html
-//! [the `ParallelString` trait]: ../str/trait.ParallelString.html
-//! [`par_extend`]: trait.ParallelExtend.html
-//! [`collect()`]: trait.ParallelIterator.html#method.collect
+//! [the `ParallelSlice` trait]: crate::slice::ParallelSlice
+//! [the `ParallelString` trait]: crate::str::ParallelString
+//! [`par_extend`]: ParallelExtend
+//! [`collect()`]: ParallelIterator::collect()
 //!
 //! To see the full range of methods available on parallel iterators,
 //! check out the [`ParallelIterator`] and [`IndexedParallelIterator`]
@@ -61,11 +61,9 @@
 //! If you'd like to build a custom parallel iterator, or to write your own
 //! combinator, then check out the [split] function and the [plumbing] module.
 //!
-//! [regular iterator]: https://doc.rust-lang.org/std/iter/trait.Iterator.html
-//! [`ParallelIterator`]: trait.ParallelIterator.html
-//! [`IndexedParallelIterator`]: trait.IndexedParallelIterator.html
-//! [split]: fn.split.html
-//! [plumbing]: plumbing/index.html
+//! [regular iterator]: Iterator
+//! [split]: split()
+//! [plumbing]: plumbing
 //!
 //! Note: Several of the `ParallelIterator` methods rely on a `Try` trait which
 //! has been deliberately obscured from the public API.  This trait is intended
@@ -82,7 +80,8 @@
 use self::plumbing::*;
 use self::private::Try;
 pub use either::Either;
-use std::cmp::{self, Ordering};
+use std::cmp::Ordering;
+use std::collections::LinkedList;
 use std::iter::{Product, Sum};
 use std::ops::{Fn, RangeBounds};
 
@@ -102,6 +101,7 @@ mod test;
 //   e.g. `find::find()`, are always used **prefixed**, so that they
 //   can be readily distinguished.
 
+mod blocks;
 mod chain;
 mod chunks;
 mod cloned;
@@ -154,11 +154,13 @@ mod try_reduce;
 mod try_reduce_with;
 mod unzip;
 mod update;
+mod walk_tree;
 mod while_some;
 mod zip;
 mod zip_eq;
 
 pub use self::{
+    blocks::{ExponentialBlocks, UniformBlocks},
     chain::Chain,
     chunks::Chunks,
     cloned::Cloned,
@@ -186,7 +188,7 @@ pub use self::{
     panic_fuse::PanicFuse,
     par_bridge::{IterBridge, ParallelBridge},
     positions::Positions,
-    repeat::{repeat, repeatn, Repeat, RepeatN},
+    repeat::{repeat, repeat_n, Repeat, RepeatN},
     rev::Rev,
     skip::Skip,
     skip_any::SkipAny,
@@ -198,19 +200,22 @@ pub use self::{
     take_any_while::TakeAnyWhile,
     try_fold::{TryFold, TryFoldWith},
     update::Update,
+    walk_tree::{
+        walk_tree, walk_tree_postfix, walk_tree_prefix, WalkTree, WalkTreePostfix, WalkTreePrefix,
+    },
     while_some::WhileSome,
     zip::Zip,
     zip_eq::ZipEq,
 };
+
+#[allow(deprecated)]
+pub use repeat::repeatn;
 
 /// `IntoParallelIterator` implements the conversion to a [`ParallelIterator`].
 ///
 /// By implementing `IntoParallelIterator` for a type, you define how it will
 /// transformed into an iterator. This is a parallel version of the standard
 /// library's [`std::iter::IntoIterator`] trait.
-///
-/// [`ParallelIterator`]: trait.ParallelIterator.html
-/// [`std::iter::IntoIterator`]: https://doc.rust-lang.org/std/iter/trait.IntoIterator.html
 pub trait IntoParallelIterator {
     /// The parallel iterator type that will be created.
     type Iter: ParallelIterator<Item = Self::Item>;
@@ -239,7 +244,7 @@ pub trait IntoParallelIterator {
     /// assert_eq!(v, [(0, 5), (1, 6), (2, 7), (3, 8), (4, 9)]);
     /// ```
     ///
-    /// [`zip`]: trait.IndexedParallelIterator.html#method.zip
+    /// [`zip`]: IndexedParallelIterator::zip()
     fn into_par_iter(self) -> Self::Iter;
 }
 
@@ -253,9 +258,6 @@ pub trait IntoParallelIterator {
 /// `for I where &I: IntoParallelIterator`. In most cases, users
 /// will want to implement [`IntoParallelIterator`] rather than implement
 /// this trait directly.
-///
-/// [`ParallelIterator`]: trait.ParallelIterator.html
-/// [`IntoParallelIterator`]: trait.IntoParallelIterator.html
 pub trait IntoParallelRefIterator<'data> {
     /// The type of the parallel iterator that will be returned.
     type Iter: ParallelIterator<Item = Self::Item>;
@@ -304,9 +306,6 @@ where
 /// `for I where &mut I: IntoParallelIterator`. In most cases, users
 /// will want to implement [`IntoParallelIterator`] rather than implement
 /// this trait directly.
-///
-/// [`ParallelIterator`]: trait.ParallelIterator.html
-/// [`IntoParallelIterator`]: trait.IntoParallelIterator.html
 pub trait IntoParallelRefMutIterator<'data> {
     /// The type of iterator that will be created.
     type Iter: ParallelIterator<Item = Self::Item>;
@@ -353,8 +352,7 @@ where
 /// For examples of using parallel iterators, see [the docs on the
 /// `iter` module][iter].
 ///
-/// [iter]: index.html
-/// [`IndexedParallelIterator`]: trait.IndexedParallelIterator.html
+/// [iter]: self
 pub trait ParallelIterator: Sized + Send {
     /// The type of item that this parallel iterator produces.
     /// For example, if you use the [`for_each`] method, this is the type of
@@ -427,7 +425,7 @@ pub trait ParallelIterator: Sized + Send {
     ///
     /// v.par_chunks_mut(1000)
     ///     .for_each_init(
-    ///         || rand::thread_rng(),
+    ///         || rand::rng(),
     ///         |rng, chunk| rng.fill(chunk),
     ///     );
     ///
@@ -528,15 +526,15 @@ pub trait ParallelIterator: Sized + Send {
     /// # Examples
     ///
     /// ```
-    /// use rand::Rng;
+    /// use rand::{Rng, TryRngCore};
     /// use rayon::prelude::*;
     ///
     /// let mut v = vec![0u8; 1_000_000];
     ///
     /// v.par_chunks_mut(1000)
     ///     .try_for_each_init(
-    ///         || rand::thread_rng(),
-    ///         |rng, chunk| rng.try_fill(chunk),
+    ///         || rand::rng(),
+    ///         |rng, chunk| rng.try_fill_bytes(chunk),
     ///     )
     ///     .expect("expected no rand errors");
     ///
@@ -653,8 +651,8 @@ pub trait ParallelIterator: Sized + Send {
     /// let a: Vec<_> = (1i32..1_000_000)
     ///     .into_par_iter()
     ///     .map_init(
-    ///         || rand::thread_rng(),  // get the thread-local RNG
-    ///         |rng, x| if rng.gen() { // randomly negate items
+    ///         || rand::rng(),  // get the thread-local RNG
+    ///         |rng, x| if rng.random() { // randomly negate items
     ///             -x
     ///         } else {
     ///             x
@@ -902,8 +900,7 @@ pub trait ParallelIterator: Sized + Send {
     fn flat_map_iter<F, SI>(self, map_op: F) -> FlatMapIter<Self, F>
     where
         F: Fn(Self::Item) -> SI + Sync + Send,
-        SI: IntoIterator,
-        SI::Item: Send,
+        SI: IntoIterator<Item: Send>,
     {
         FlatMapIter::new(self, map_op)
     }
@@ -947,8 +944,7 @@ pub trait ParallelIterator: Sized + Send {
     /// ```
     fn flatten_iter(self) -> FlattenIter<Self>
     where
-        Self::Item: IntoIterator,
-        <Self::Item as IntoIterator>::Item: Send,
+        Self::Item: IntoIterator<Item: Send>,
     {
         FlattenIter::new(self)
     }
@@ -1425,7 +1421,7 @@ pub trait ParallelIterator: Sized + Send {
     /// specified, so if the `Ord` impl is not truly associative, then
     /// the results are not deterministic.
     ///
-    /// Basically equivalent to `self.reduce_with(|a, b| cmp::min(a, b))`.
+    /// Basically equivalent to `self.reduce_with(|a, b| Ord::min(a, b))`.
     ///
     /// # Examples
     ///
@@ -1444,7 +1440,7 @@ pub trait ParallelIterator: Sized + Send {
     where
         Self::Item: Ord,
     {
-        self.reduce_with(cmp::min)
+        self.reduce_with(Ord::min)
     }
 
     /// Computes the minimum of all the items in the iterator with respect to
@@ -1523,7 +1519,7 @@ pub trait ParallelIterator: Sized + Send {
     /// specified, so if the `Ord` impl is not truly associative, then
     /// the results are not deterministic.
     ///
-    /// Basically equivalent to `self.reduce_with(|a, b| cmp::max(a, b))`.
+    /// Basically equivalent to `self.reduce_with(|a, b| Ord::max(a, b))`.
     ///
     /// # Examples
     ///
@@ -1542,7 +1538,7 @@ pub trait ParallelIterator: Sized + Send {
     where
         Self::Item: Ord,
     {
-        self.reduce_with(cmp::max)
+        self.reduce_with(Ord::max)
     }
 
     /// Computes the maximum of all the items in the iterator with respect to
@@ -1646,7 +1642,7 @@ pub trait ParallelIterator: Sized + Send {
     /// the rest of the items in the iterator as soon as possible
     /// (just as `find` stops iterating once a match is found).
     ///
-    /// [find]: https://doc.rust-lang.org/std/iter/trait.Iterator.html#method.find
+    /// [find]: Iterator::find()
     ///
     /// # Examples
     ///
@@ -1672,6 +1668,9 @@ pub trait ParallelIterator: Sized + Send {
     /// Once a match is found, all attempts to the right of the match
     /// will be stopped, while attempts to the left must continue in case
     /// an earlier match is found.
+    ///
+    /// For added performance, you might consider using `find_first` in conjunction with
+    /// [`by_exponential_blocks()`][IndexedParallelIterator::by_exponential_blocks].
     ///
     /// Note that not all parallel iterators have a useful order, much like
     /// sequential `HashMap` iteration, so "first" may be nebulous.  If you
@@ -1927,7 +1926,7 @@ pub trait ParallelIterator: Sized + Send {
     /// to stop processing other items sooner, with the cost of additional
     /// synchronization overhead, which may also inhibit some optimizations.
     ///
-    /// [`join`]: ../fn.join.html#panics
+    /// [`join`]: crate::join()#panics
     ///
     /// # Examples
     ///
@@ -1961,9 +1960,11 @@ pub trait ParallelIterator: Sized + Send {
     /// of how many elements the iterator contains, and even allows you to reuse
     /// an existing vector's backing store rather than allocating a fresh vector.
     ///
-    /// [`IndexedParallelIterator`]: trait.IndexedParallelIterator.html
-    /// [`collect_into_vec()`]:
-    ///     trait.IndexedParallelIterator.html#method.collect_into_vec
+    /// See also [`collect_vec_list()`] for collecting into a
+    /// `LinkedList<Vec<T>>`.
+    ///
+    /// [`collect_into_vec()`]: IndexedParallelIterator::collect_into_vec()
+    /// [`collect_vec_list()`]: Self::collect_vec_list()
     ///
     /// # Examples
     ///
@@ -2339,6 +2340,51 @@ pub trait ParallelIterator: Sized + Send {
         SkipAnyWhile::new(self, predicate)
     }
 
+    /// Collects this iterator into a linked list of vectors.
+    ///
+    /// This is useful when you need to condense a parallel iterator into a collection,
+    /// but have no specific requirements for what that collection should be. If you
+    /// plan to store the collection longer-term, `Vec<T>` is, as always, likely the
+    /// best default choice, despite the overhead that comes from concatenating each
+    /// vector. Or, if this is an `IndexedParallelIterator`, you should also prefer to
+    /// just collect to a `Vec<T>`.
+    ///
+    /// Internally, most [`FromParallelIterator`]/[`ParallelExtend`] implementations
+    /// use this strategy; each job collecting their chunk of the iterator to a `Vec<T>`
+    /// and those chunks getting merged into a `LinkedList`, before then extending the
+    /// collection with each vector. This is a very efficient way to collect an
+    /// unindexed parallel iterator, without much intermediate data movement.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::collections::LinkedList;
+    /// use rayon::prelude::*;
+    ///
+    /// let result: LinkedList<Vec<_>> = (0..=100)
+    ///     .into_par_iter()
+    ///     .filter(|x| x % 2 == 0)
+    ///     .flat_map(|x| 0..x)
+    ///     .collect_vec_list();
+    ///
+    /// // `par_iter.collect_vec_list().into_iter().flatten()` turns
+    /// // a parallel iterator into a serial one
+    /// let total_len = result.into_iter().flatten().count();
+    /// assert_eq!(total_len, 2550);
+    /// ```
+    fn collect_vec_list(self) -> LinkedList<Vec<Self::Item>> {
+        match extend::fast_collect(self) {
+            Either::Left(vec) => {
+                let mut list = LinkedList::new();
+                if !vec.is_empty() {
+                    list.push_back(vec);
+                }
+                list
+            }
+            Either::Right(list) => list,
+        }
+    }
+
     /// Internal method used to define the behavior of this parallel
     /// iterator. You should not need to call this directly.
     ///
@@ -2350,7 +2396,7 @@ pub trait ParallelIterator: Sized + Send {
     /// See the [README] for more details on the internals of parallel
     /// iterators.
     ///
-    /// [README]: https://github.com/rayon-rs/rayon/blob/master/src/iter/plumbing/README.md
+    /// [README]: https://github.com/rayon-rs/rayon/blob/main/src/iter/plumbing/README.md
     fn drive_unindexed<C>(self, consumer: C) -> C::Result
     where
         C: UnindexedConsumer<Self::Item>;
@@ -2391,6 +2437,70 @@ impl<T: ParallelIterator> IntoParallelIterator for T {
 // Waiting for `ExactSizeIterator::is_empty` to be stabilized. See rust-lang/rust#35428
 #[allow(clippy::len_without_is_empty)]
 pub trait IndexedParallelIterator: ParallelIterator {
+    /// Divides an iterator into sequential blocks of exponentially-increasing size.
+    ///
+    /// Normally, parallel iterators are recursively divided into tasks in parallel.
+    /// This adaptor changes the default behavior by splitting the iterator into a **sequence**
+    /// of parallel iterators of increasing sizes.
+    /// Sizes grow exponentially in order to avoid creating
+    /// too many blocks. This also allows to balance the current block with all previous ones.
+    ///
+    /// This can have many applications but the most notable ones are:
+    /// - better performance with [`find_first()`][ParallelIterator::find_first]
+    /// - more predictable performance with [`find_any()`][ParallelIterator::find_any]
+    ///   or any interruptible computation
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rayon::prelude::*;
+    /// assert_eq!((0..10_000).into_par_iter()
+    ///                       .by_exponential_blocks()
+    ///                       .find_first(|&e| e==4_999), Some(4_999))
+    /// ```
+    ///
+    /// In this example, without blocks, rayon will split the initial range into two but all work
+    /// on the right hand side (from 5,000 onwards) is **useless** since the sequential algorithm
+    /// never goes there. This means that if two threads are used there will be **no** speedup **at
+    /// all**.
+    ///
+    /// `by_exponential_blocks` on the other hand will start with the leftmost range from 0
+    /// to `p` (threads number), continue with p to 3p, the 3p to 7p...
+    ///
+    /// Each subrange is treated in parallel, while all subranges are treated sequentially.
+    /// We therefore ensure a logarithmic number of blocks (and overhead) while guaranteeing
+    /// we stop at the first block containing the searched data.
+    fn by_exponential_blocks(self) -> ExponentialBlocks<Self> {
+        ExponentialBlocks::new(self)
+    }
+
+    /// Divides an iterator into sequential blocks of the given size.
+    ///
+    /// Normally, parallel iterators are recursively divided into tasks in parallel.
+    /// This adaptor changes the default behavior by splitting the iterator into a **sequence**
+    /// of parallel iterators of given `block_size`.
+    /// The main application is to obtain better
+    /// memory locality (especially if the reduce operation re-use folded data).
+    ///
+    /// **Panics** if `block_size` is 0.
+    ///
+    /// # Example
+    /// ```
+    /// use rayon::prelude::*;
+    /// // during most reductions v1 and v2 fit the cache
+    /// let v = (0u32..10_000_000)
+    ///     .into_par_iter()
+    ///     .by_uniform_blocks(1_000_000)
+    ///     .fold(Vec::new, |mut v, e| { v.push(e); v})
+    ///     .reduce(Vec::new, |mut v1, mut v2| { v1.append(&mut v2); v1});
+    /// assert_eq!(v, (0u32..10_000_000).collect::<Vec<u32>>());
+    /// ```
+    #[track_caller]
+    fn by_uniform_blocks(self, block_size: usize) -> UniformBlocks<Self> {
+        assert!(block_size != 0, "block_size must not be zero");
+        UniformBlocks::new(self, block_size)
+    }
+
     /// Collects the results of the iterator into the specified
     /// vector. The vector is always cleared before execution
     /// begins. If possible, reusing the vector across calls can lead
@@ -2463,8 +2573,7 @@ pub trait IndexedParallelIterator: ParallelIterator {
     /// ```
     fn zip<Z>(self, zip_op: Z) -> Zip<Self, Z::Iter>
     where
-        Z: IntoParallelIterator,
-        Z::Iter: IndexedParallelIterator,
+        Z: IntoParallelIterator<Iter: IndexedParallelIterator>,
     {
         Zip::new(self, zip_op.into_par_iter())
     }
@@ -2491,8 +2600,7 @@ pub trait IndexedParallelIterator: ParallelIterator {
     #[track_caller]
     fn zip_eq<Z>(self, zip_op: Z) -> ZipEq<Self, Z::Iter>
     where
-        Z: IntoParallelIterator,
-        Z::Iter: IndexedParallelIterator,
+        Z: IntoParallelIterator<Iter: IndexedParallelIterator>,
     {
         let zip_op_iter = zip_op.into_par_iter();
         assert_eq!(
@@ -2519,8 +2627,7 @@ pub trait IndexedParallelIterator: ParallelIterator {
     /// ```
     fn interleave<I>(self, other: I) -> Interleave<Self, I::Iter>
     where
-        I: IntoParallelIterator<Item = Self::Item>,
-        I::Iter: IndexedParallelIterator<Item = Self::Item>,
+        I: IntoParallelIterator<Item = Self::Item, Iter: IndexedParallelIterator>,
     {
         Interleave::new(self, other.into_par_iter())
     }
@@ -2538,8 +2645,7 @@ pub trait IndexedParallelIterator: ParallelIterator {
     /// ```
     fn interleave_shortest<I>(self, other: I) -> InterleaveShortest<Self, I::Iter>
     where
-        I: IntoParallelIterator<Item = Self::Item>,
-        I::Iter: IndexedParallelIterator<Item = Self::Item>,
+        I: IntoParallelIterator<Item = Self::Item, Iter: IndexedParallelIterator>,
     {
         InterleaveShortest::new(self, other.into_par_iter())
     }
@@ -2553,8 +2659,10 @@ pub trait IndexedParallelIterator: ParallelIterator {
     /// See also [`par_chunks()`] and [`par_chunks_mut()`] for similar behavior on
     /// slices, without having to allocate intermediate `Vec`s for the chunks.
     ///
-    /// [`par_chunks()`]: ../slice/trait.ParallelSlice.html#method.par_chunks
-    /// [`par_chunks_mut()`]: ../slice/trait.ParallelSliceMut.html#method.par_chunks_mut
+    /// [`par_chunks()`]: crate::slice::ParallelSlice::par_chunks()
+    /// [`par_chunks_mut()`]: crate::slice::ParallelSliceMut::par_chunks_mut()
+    ///
+    /// **Panics** if `chunk_size` is 0.
     ///
     /// # Examples
     ///
@@ -2669,8 +2777,7 @@ pub trait IndexedParallelIterator: ParallelIterator {
     /// ```
     fn cmp<I>(self, other: I) -> Ordering
     where
-        I: IntoParallelIterator<Item = Self::Item>,
-        I::Iter: IndexedParallelIterator,
+        I: IntoParallelIterator<Item = Self::Item, Iter: IndexedParallelIterator>,
         Self::Item: Ord,
     {
         #[inline]
@@ -2699,18 +2806,16 @@ pub trait IndexedParallelIterator: ParallelIterator {
     /// ```
     /// use rayon::prelude::*;
     /// use std::cmp::Ordering::*;
-    /// use std::f64::NAN;
     ///
     /// let x = vec![1.0, 2.0, 3.0];
     /// assert_eq!(x.par_iter().partial_cmp(&vec![1.0, 3.0, 0.0]), Some(Less));
     /// assert_eq!(x.par_iter().partial_cmp(&vec![1.0, 2.0, 3.0]), Some(Equal));
     /// assert_eq!(x.par_iter().partial_cmp(&vec![1.0, 2.0]), Some(Greater));
-    /// assert_eq!(x.par_iter().partial_cmp(&vec![1.0, NAN]), None);
+    /// assert_eq!(x.par_iter().partial_cmp(&vec![1.0, f64::NAN]), None);
     /// ```
     fn partial_cmp<I>(self, other: I) -> Option<Ordering>
     where
-        I: IntoParallelIterator,
-        I::Iter: IndexedParallelIterator,
+        I: IntoParallelIterator<Iter: IndexedParallelIterator>,
         Self::Item: PartialOrd<I::Item>,
     {
         #[inline]
@@ -2735,8 +2840,7 @@ pub trait IndexedParallelIterator: ParallelIterator {
     /// are equal to those of another
     fn eq<I>(self, other: I) -> bool
     where
-        I: IntoParallelIterator,
-        I::Iter: IndexedParallelIterator,
+        I: IntoParallelIterator<Iter: IndexedParallelIterator>,
         Self::Item: PartialEq<I::Item>,
     {
         #[inline]
@@ -2752,8 +2856,7 @@ pub trait IndexedParallelIterator: ParallelIterator {
     /// are unequal to those of another
     fn ne<I>(self, other: I) -> bool
     where
-        I: IntoParallelIterator,
-        I::Iter: IndexedParallelIterator,
+        I: IntoParallelIterator<Iter: IndexedParallelIterator>,
         Self::Item: PartialEq<I::Item>,
     {
         !self.eq(other)
@@ -2763,19 +2866,17 @@ pub trait IndexedParallelIterator: ParallelIterator {
     /// are lexicographically less than those of another.
     fn lt<I>(self, other: I) -> bool
     where
-        I: IntoParallelIterator,
-        I::Iter: IndexedParallelIterator,
+        I: IntoParallelIterator<Iter: IndexedParallelIterator>,
         Self::Item: PartialOrd<I::Item>,
     {
         self.partial_cmp(other) == Some(Ordering::Less)
     }
 
     /// Determines if the elements of this `ParallelIterator`
-    /// are less or equal to those of another.
+    /// are less than or equal to those of another.
     fn le<I>(self, other: I) -> bool
     where
-        I: IntoParallelIterator,
-        I::Iter: IndexedParallelIterator,
+        I: IntoParallelIterator<Iter: IndexedParallelIterator>,
         Self::Item: PartialOrd<I::Item>,
     {
         let ord = self.partial_cmp(other);
@@ -2786,19 +2887,17 @@ pub trait IndexedParallelIterator: ParallelIterator {
     /// are lexicographically greater than those of another.
     fn gt<I>(self, other: I) -> bool
     where
-        I: IntoParallelIterator,
-        I::Iter: IndexedParallelIterator,
+        I: IntoParallelIterator<Iter: IndexedParallelIterator>,
         Self::Item: PartialOrd<I::Item>,
     {
         self.partial_cmp(other) == Some(Ordering::Greater)
     }
 
     /// Determines if the elements of this `ParallelIterator`
-    /// are less or equal to those of another.
+    /// are greater than or equal to those of another.
     fn ge<I>(self, other: I) -> bool
     where
-        I: IntoParallelIterator,
-        I::Iter: IndexedParallelIterator,
+        I: IntoParallelIterator<Iter: IndexedParallelIterator>,
         Self::Item: PartialOrd<I::Item>,
     {
         let ord = self.partial_cmp(other);
@@ -3123,7 +3222,7 @@ pub trait IndexedParallelIterator: ParallelIterator {
     /// See the [README] for more details on the internals of parallel
     /// iterators.
     ///
-    /// [README]: https://github.com/rayon-rs/rayon/blob/master/src/iter/plumbing/README.md
+    /// [README]: https://github.com/rayon-rs/rayon/blob/main/src/iter/plumbing/README.md
     fn drive<C: Consumer<Self::Item>>(self, consumer: C) -> C::Result;
 
     /// Internal method used to define the behavior of this parallel
@@ -3140,7 +3239,7 @@ pub trait IndexedParallelIterator: ParallelIterator {
     /// See the [README] for more details on the internals of parallel
     /// iterators.
     ///
-    /// [README]: https://github.com/rayon-rs/rayon/blob/master/src/iter/plumbing/README.md
+    /// [README]: https://github.com/rayon-rs/rayon/blob/main/src/iter/plumbing/README.md
     fn with_producer<CB: ProducerCallback<Self::Item>>(self, callback: CB) -> CB::Output;
 }
 
@@ -3151,8 +3250,7 @@ pub trait IndexedParallelIterator: ParallelIterator {
 ///
 /// `FromParallelIterator` is used through [`ParallelIterator`]'s [`collect()`] method.
 ///
-/// [`ParallelIterator`]: trait.ParallelIterator.html
-/// [`collect()`]: trait.ParallelIterator.html#method.collect
+/// [`collect()`]: ParallelIterator::collect()
 ///
 /// # Examples
 ///
@@ -3160,7 +3258,6 @@ pub trait IndexedParallelIterator: ParallelIterator {
 ///
 /// ```
 /// use rayon::prelude::*;
-/// use std::mem;
 ///
 /// struct BlackHole {
 ///     mass: usize,
@@ -3172,7 +3269,7 @@ pub trait IndexedParallelIterator: ParallelIterator {
 ///     {
 ///         let par_iter = par_iter.into_par_iter();
 ///         BlackHole {
-///             mass: par_iter.count() * mem::size_of::<T>(),
+///             mass: par_iter.count() * size_of::<T>(),
 ///         }
 ///     }
 /// }
@@ -3188,17 +3285,18 @@ where
     ///
     /// If your collection is not naturally parallel, the easiest (and
     /// fastest) way to do this is often to collect `par_iter` into a
-    /// [`LinkedList`] or other intermediate data structure and then
-    /// sequentially extend your collection. However, a more 'native'
-    /// technique is to use the [`par_iter.fold`] or
+    /// [`LinkedList`] (via [`collect_vec_list`]) or another intermediate
+    /// data structure and then sequentially extend your collection. However,
+    /// a more 'native' technique is to use the [`par_iter.fold`] or
     /// [`par_iter.fold_with`] methods to create the collection.
     /// Alternatively, if your collection is 'natively' parallel, you
-    /// can use `par_iter.for_each` to process each element in turn.
+    /// can use [`par_iter.for_each`] to process each element in turn.
     ///
-    /// [`LinkedList`]: https://doc.rust-lang.org/std/collections/struct.LinkedList.html
-    /// [`par_iter.fold`]: trait.ParallelIterator.html#method.fold
-    /// [`par_iter.fold_with`]: trait.ParallelIterator.html#method.fold_with
-    /// [`par_iter.for_each`]: trait.ParallelIterator.html#method.for_each
+    /// [`LinkedList`]: std::collections::LinkedList
+    /// [`collect_vec_list`]: ParallelIterator::collect_vec_list
+    /// [`par_iter.fold`]: ParallelIterator::fold()
+    /// [`par_iter.fold_with`]: ParallelIterator::fold_with()
+    /// [`par_iter.for_each`]: ParallelIterator::for_each()
     fn from_par_iter<I>(par_iter: I) -> Self
     where
         I: IntoParallelIterator<Item = T>;
@@ -3206,15 +3304,12 @@ where
 
 /// `ParallelExtend` extends an existing collection with items from a [`ParallelIterator`].
 ///
-/// [`ParallelIterator`]: trait.ParallelIterator.html
-///
 /// # Examples
 ///
 /// Implementing `ParallelExtend` for your type:
 ///
 /// ```
 /// use rayon::prelude::*;
-/// use std::mem;
 ///
 /// struct BlackHole {
 ///     mass: usize,
@@ -3225,7 +3320,7 @@ where
 ///         where I: IntoParallelIterator<Item = T>
 ///     {
 ///         let par_iter = par_iter.into_par_iter();
-///         self.mass += par_iter.count() * mem::size_of::<T>();
+///         self.mass += par_iter.count() * size_of::<T>();
 ///     }
 /// }
 ///
@@ -3262,8 +3357,6 @@ where
 ///
 /// Types which are indexable typically implement [`ParallelDrainRange`]
 /// instead, where you can drain fully with `par_drain(..)`.
-///
-/// [`ParallelDrainRange`]: trait.ParallelDrainRange.html
 pub trait ParallelDrainFull {
     /// The draining parallel iterator type that will be created.
     type Iter: ParallelIterator<Item = Self::Item>;
@@ -3304,8 +3397,6 @@ pub trait ParallelDrainFull {
 /// from a collection while retaining the original capacity.
 ///
 /// Types which are not indexable may implement [`ParallelDrainFull`] instead.
-///
-/// [`ParallelDrainFull`]: trait.ParallelDrainFull.html
 pub trait ParallelDrainRange<Idx = usize> {
     /// The draining parallel iterator type that will be created.
     type Iter: ParallelIterator<Item = Self::Item>;
@@ -3411,6 +3502,7 @@ mod private {
         fn from_residual(residual: Self::Residual) -> Self {
             match residual {
                 Break(b) => Break(b),
+                #[allow(unreachable_patterns)]
                 Continue(_) => unreachable!(),
             }
         }
@@ -3436,6 +3528,7 @@ mod private {
         fn from_residual(residual: Self::Residual) -> Self {
             match residual {
                 None => None,
+                #[allow(unreachable_patterns)]
                 Some(_) => unreachable!(),
             }
         }
@@ -3461,6 +3554,7 @@ mod private {
         fn from_residual(residual: Self::Residual) -> Self {
             match residual {
                 Err(e) => Err(e),
+                #[allow(unreachable_patterns)]
                 Ok(_) => unreachable!(),
             }
         }
@@ -3486,6 +3580,7 @@ mod private {
         fn from_residual(residual: Self::Residual) -> Self {
             match residual {
                 Err(e) => Poll::Ready(Err(e)),
+                #[allow(unreachable_patterns)]
                 Ok(_) => unreachable!(),
             }
         }
@@ -3515,6 +3610,7 @@ mod private {
         fn from_residual(residual: Self::Residual) -> Self {
             match residual {
                 Err(e) => Poll::Ready(Some(Err(e))),
+                #[allow(unreachable_patterns)]
                 Ok(_) => unreachable!(),
             }
         }

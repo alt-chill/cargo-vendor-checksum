@@ -5,7 +5,7 @@ use pin_project_lite::pin_project;
 use std::fmt;
 use std::io::{self, IoSlice, SeekFrom, Write};
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::task::{ready, Context, Poll};
 
 pin_project! {
     /// Wraps a writer and buffers its output.
@@ -212,11 +212,11 @@ impl<W: AsyncWrite> AsyncWrite for BufWriter<W> {
 
 #[derive(Debug, Clone, Copy)]
 pub(super) enum SeekState {
-    /// start_seek has not been called.
+    /// `start_seek` has not been called.
     Init,
-    /// start_seek has been called, but poll_complete has not yet been called.
+    /// `start_seek` has been called, but `poll_complete` has not yet been called.
     Start(SeekFrom),
-    /// Waiting for completion of poll_complete.
+    /// Waiting for completion of `poll_complete`.
     Pending,
 }
 
@@ -282,7 +282,7 @@ impl<W: AsyncWrite + AsyncBufRead> AsyncBufRead for BufWriter<W> {
     }
 
     fn consume(self: Pin<&mut Self>, amt: usize) {
-        self.get_pin_mut().consume(amt)
+        self.get_pin_mut().consume(amt);
     }
 }
 

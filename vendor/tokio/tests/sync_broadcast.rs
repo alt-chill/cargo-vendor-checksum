@@ -52,9 +52,11 @@ macro_rules! assert_closed {
     };
 }
 
+#[allow(unused)]
 trait AssertSend: Send + Sync {}
 impl AssertSend for broadcast::Sender<i32> {}
 impl AssertSend for broadcast::Receiver<i32> {}
+impl AssertSend for broadcast::WeakSender<i32> {}
 
 #[test]
 fn send_try_recv_bounded() {
@@ -285,8 +287,6 @@ fn zero_capacity() {
 #[should_panic]
 #[cfg(not(target_family = "wasm"))] // wasm currently doesn't support unwinding
 fn capacity_too_big() {
-    use std::usize;
-
     broadcast::channel::<()>(1 + (usize::MAX >> 1));
 }
 
@@ -565,13 +565,11 @@ fn sender_len() {
 #[test]
 #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
 fn sender_len_random() {
-    use rand::Rng;
-
     let (tx, mut rx1) = broadcast::channel(16);
     let mut rx2 = tx.subscribe();
 
     for _ in 0..1000 {
-        match rand::thread_rng().gen_range(0..4) {
+        match rand::random_range(0..4) {
             0 => {
                 let _ = rx1.try_recv();
             }
@@ -640,4 +638,71 @@ fn send_in_waker_drop() {
 
     // Shouldn't deadlock.
     let _ = tx.send(());
+}
+
+#[tokio::test]
+async fn receiver_recv_is_cooperative() {
+    let (tx, mut rx) = broadcast::channel(8);
+
+    tokio::select! {
+        biased;
+        _ = async {
+            loop {
+                assert!(tx.send(()).is_ok());
+                assert!(rx.recv().await.is_ok());
+            }
+        } => {},
+        _ = tokio::task::yield_now() => {},
+    }
+}
+
+#[test]
+fn broadcast_sender_closed() {
+    let (tx, rx) = broadcast::channel::<()>(1);
+    let rx2 = tx.subscribe();
+
+    let mut task = task::spawn(tx.closed());
+    assert_pending!(task.poll());
+
+    drop(rx);
+    assert!(!task.is_woken());
+    assert_pending!(task.poll());
+
+    drop(rx2);
+    assert!(task.is_woken());
+    assert_ready!(task.poll());
+}
+
+#[test]
+fn broadcast_sender_closed_with_extra_subscribe() {
+    let (tx, rx) = broadcast::channel::<()>(1);
+    let rx2 = tx.subscribe();
+
+    let mut task = task::spawn(tx.closed());
+    assert_pending!(task.poll());
+
+    drop(rx);
+    assert!(!task.is_woken());
+    assert_pending!(task.poll());
+
+    drop(rx2);
+    assert!(task.is_woken());
+
+    let rx3 = tx.subscribe();
+    assert_pending!(task.poll());
+
+    drop(rx3);
+    assert!(task.is_woken());
+    assert_ready!(task.poll());
+
+    let mut task2 = task::spawn(tx.closed());
+    assert_ready!(task2.poll());
+
+    let rx4 = tx.subscribe();
+    let mut task3 = task::spawn(tx.closed());
+    assert_pending!(task3.poll());
+
+    drop(rx4);
+    assert!(task3.is_woken());
+    assert_ready!(task3.poll());
 }

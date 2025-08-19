@@ -17,6 +17,7 @@ use std::panic::{RefUnwindSafe, UnwindSafe};
 use std::pin::Pin;
 use std::ptr::NonNull;
 use std::sync::atomic::Ordering::{self, Acquire, Relaxed, Release, SeqCst};
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 type WaitList = LinkedList<Waiter, <Waiter as linked_list::Link>::Target>;
@@ -223,7 +224,9 @@ struct Waiter {
     /// `Notify`, or it is exclusively owned by the enclosing `Waiter`.
     waker: UnsafeCell<Option<Waker>>,
 
-    /// Notification for this waiter.
+    /// Notification for this waiter. Uses 2 bits to store if and how was
+    /// notified, 1 bit for storing if it was woken up using FIFO or LIFO, and
+    /// the rest of it is unused.
     /// * if it's `None`, then `waker` is protected by the `waiters` lock.
     /// * if it's `Some`, then `waker` is exclusively owned by the
     ///   enclosing `Waiter` and can be accessed without locking.
@@ -253,13 +256,16 @@ generate_addr_of_methods! {
 }
 
 // No notification.
-const NOTIFICATION_NONE: usize = 0;
+const NOTIFICATION_NONE: usize = 0b000;
 
 // Notification type used by `notify_one`.
-const NOTIFICATION_ONE: usize = 1;
+const NOTIFICATION_ONE: usize = 0b001;
+
+// Notification type used by `notify_last`.
+const NOTIFICATION_LAST: usize = 0b101;
 
 // Notification type used by `notify_waiters`.
-const NOTIFICATION_ALL: usize = 2;
+const NOTIFICATION_ALL: usize = 0b010;
 
 /// Notification for a `Waiter`.
 /// This struct is equivalent to `Option<Notification>`, but uses
@@ -275,13 +281,20 @@ impl AtomicNotification {
     /// Store-release a notification.
     /// This method should be called exactly once.
     fn store_release(&self, notification: Notification) {
-        self.0.store(notification as usize, Release);
+        let data: usize = match notification {
+            Notification::All => NOTIFICATION_ALL,
+            Notification::One(NotifyOneStrategy::Fifo) => NOTIFICATION_ONE,
+            Notification::One(NotifyOneStrategy::Lifo) => NOTIFICATION_LAST,
+        };
+        self.0.store(data, Release);
     }
 
     fn load(&self, ordering: Ordering) -> Option<Notification> {
-        match self.0.load(ordering) {
+        let data = self.0.load(ordering);
+        match data {
             NOTIFICATION_NONE => None,
-            NOTIFICATION_ONE => Some(Notification::One),
+            NOTIFICATION_ONE => Some(Notification::One(NotifyOneStrategy::Fifo)),
+            NOTIFICATION_LAST => Some(Notification::One(NotifyOneStrategy::Lifo)),
             NOTIFICATION_ALL => Some(Notification::All),
             _ => unreachable!(),
         }
@@ -298,9 +311,16 @@ impl AtomicNotification {
 
 #[derive(Debug, PartialEq, Eq)]
 #[repr(usize)]
+enum NotifyOneStrategy {
+    Fifo,
+    Lifo,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+#[repr(usize)]
 enum Notification {
-    One = NOTIFICATION_ONE,
-    All = NOTIFICATION_ALL,
+    One(NotifyOneStrategy),
+    All,
 }
 
 /// List used in `Notify::notify_waiters`. It wraps a guarded linked list
@@ -360,6 +380,7 @@ impl Drop for NotifyWaitersList<'_> {
 /// This future is fused, so once it has completed, any future calls to poll
 /// will immediately return `Poll::Ready`.
 #[derive(Debug)]
+#[must_use = "futures do nothing unless you `.await` or poll them"]
 pub struct Notified<'a> {
     /// The `Notify` being received on.
     notify: &'a Notify,
@@ -376,6 +397,38 @@ pub struct Notified<'a> {
 
 unsafe impl<'a> Send for Notified<'a> {}
 unsafe impl<'a> Sync for Notified<'a> {}
+
+/// Future returned from [`Notify::notified_owned()`].
+///
+/// This future is fused, so once it has completed, any future calls to poll
+/// will immediately return `Poll::Ready`.
+#[derive(Debug)]
+#[must_use = "futures do nothing unless you `.await` or poll them"]
+pub struct OwnedNotified {
+    /// The `Notify` being received on.
+    notify: Arc<Notify>,
+
+    /// The current state of the receiving process.
+    state: State,
+
+    /// Number of calls to `notify_waiters` at the time of creation.
+    notify_waiters_calls: usize,
+
+    /// Entry in the waiter `LinkedList`.
+    waiter: Waiter,
+}
+
+unsafe impl Sync for OwnedNotified {}
+
+/// A custom `project` implementation is used in place of `pin-project-lite`
+/// as a custom drop for [`Notified`] and [`OwnedNotified`] implementation
+/// is needed.
+struct NotifiedProject<'a> {
+    notify: &'a Notify,
+    state: &'a mut State,
+    notify_waiters_calls: &'a usize,
+    waiter: &'a Waiter,
+}
 
 #[derive(Debug)]
 enum State {
@@ -521,7 +574,54 @@ impl Notify {
         }
     }
 
-    /// Notifies a waiting task.
+    /// Wait for a notification with an owned `Future`.
+    ///
+    /// Unlike [`Self::notified`] which returns a future tied to the `Notify`'s
+    /// lifetime, `notified_owned` creates a self-contained future that owns its
+    /// notification state, making it safe to move between threads.
+    ///
+    /// See [`Self::notified`] for more details.
+    ///
+    /// # Cancel safety
+    ///
+    /// This method uses a queue to fairly distribute notifications in the order
+    /// they were requested. Cancelling a call to `notified_owned` makes you lose your
+    /// place in the queue.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use tokio::sync::Notify;
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let notify = Arc::new(Notify::new());
+    ///
+    ///     for _ in 0..10 {
+    ///         let notified = notify.clone().notified_owned();
+    ///         tokio::spawn(async move {
+    ///             notified.await;
+    ///             println!("received notification");
+    ///         });
+    ///     }
+    ///
+    ///     println!("sending notification");
+    ///     notify.notify_waiters();
+    /// }
+    /// ```
+    pub fn notified_owned(self: Arc<Self>) -> OwnedNotified {
+        // we load the number of times notify_waiters
+        // was called and store that in the future.
+        let state = self.state.load(SeqCst);
+        OwnedNotified {
+            notify: self,
+            state: State::Init,
+            notify_waiters_calls: get_num_notify_waiters_calls(state),
+            waiter: Waiter::new(),
+        }
+    }
+    /// Notifies the first waiting task.
     ///
     /// If a task is currently waiting, that task is notified. Otherwise, a
     /// permit is stored in this `Notify` value and the **next** call to
@@ -558,6 +658,23 @@ impl Notify {
     // Alias for old name in 0.x
     #[cfg_attr(docsrs, doc(alias = "notify"))]
     pub fn notify_one(&self) {
+        self.notify_with_strategy(NotifyOneStrategy::Fifo);
+    }
+
+    /// Notifies the last waiting task.
+    ///
+    /// This function behaves similar to `notify_one`. The only difference is that it wakes
+    /// the most recently added waiter instead of the oldest waiter.
+    ///
+    /// Check the [`notify_one()`] documentation for more info and
+    /// examples.
+    ///
+    /// [`notify_one()`]: Notify::notify_one
+    pub fn notify_last(&self) {
+        self.notify_with_strategy(NotifyOneStrategy::Lifo);
+    }
+
+    fn notify_with_strategy(&self, strategy: NotifyOneStrategy) {
         // Load the current state
         let mut curr = self.state.load(SeqCst);
 
@@ -585,7 +702,7 @@ impl Notify {
         // transition out of WAITING while the lock is held.
         curr = self.state.load(SeqCst);
 
-        if let Some(waker) = notify_locked(&mut waiters, &self.state, curr) {
+        if let Some(waker) = notify_locked(&mut waiters, &self.state, curr, strategy) {
             drop(waiters);
             waker.wake();
         }
@@ -708,51 +825,58 @@ impl Default for Notify {
 impl UnwindSafe for Notify {}
 impl RefUnwindSafe for Notify {}
 
-fn notify_locked(waiters: &mut WaitList, state: &AtomicUsize, curr: usize) -> Option<Waker> {
-    loop {
-        match get_state(curr) {
-            EMPTY | NOTIFIED => {
-                let res = state.compare_exchange(curr, set_state(curr, NOTIFIED), SeqCst, SeqCst);
+fn notify_locked(
+    waiters: &mut WaitList,
+    state: &AtomicUsize,
+    curr: usize,
+    strategy: NotifyOneStrategy,
+) -> Option<Waker> {
+    match get_state(curr) {
+        EMPTY | NOTIFIED => {
+            let res = state.compare_exchange(curr, set_state(curr, NOTIFIED), SeqCst, SeqCst);
 
-                match res {
-                    Ok(_) => return None,
-                    Err(actual) => {
-                        let actual_state = get_state(actual);
-                        assert!(actual_state == EMPTY || actual_state == NOTIFIED);
-                        state.store(set_state(actual, NOTIFIED), SeqCst);
-                        return None;
-                    }
+            match res {
+                Ok(_) => None,
+                Err(actual) => {
+                    let actual_state = get_state(actual);
+                    assert!(actual_state == EMPTY || actual_state == NOTIFIED);
+                    state.store(set_state(actual, NOTIFIED), SeqCst);
+                    None
                 }
             }
-            WAITING => {
-                // At this point, it is guaranteed that the state will not
-                // concurrently change as holding the lock is required to
-                // transition **out** of `WAITING`.
-                //
-                // Get a pending waiter
-                let waiter = waiters.pop_back().unwrap();
-
-                // Safety: we never make mutable references to waiters.
-                let waiter = unsafe { waiter.as_ref() };
-
-                // Safety: we hold the lock, so we can access the waker.
-                let waker = unsafe { waiter.waker.with_mut(|waker| (*waker).take()) };
-
-                // This waiter is unlinked and will not be shared ever again, release it.
-                waiter.notification.store_release(Notification::One);
-
-                if waiters.is_empty() {
-                    // As this the **final** waiter in the list, the state
-                    // must be transitioned to `EMPTY`. As transitioning
-                    // **from** `WAITING` requires the lock to be held, a
-                    // `store` is sufficient.
-                    state.store(set_state(curr, EMPTY), SeqCst);
-                }
-
-                return waker;
-            }
-            _ => unreachable!(),
         }
+        WAITING => {
+            // At this point, it is guaranteed that the state will not
+            // concurrently change as holding the lock is required to
+            // transition **out** of `WAITING`.
+            //
+            // Get a pending waiter using one of the available dequeue strategies.
+            let waiter = match strategy {
+                NotifyOneStrategy::Fifo => waiters.pop_back().unwrap(),
+                NotifyOneStrategy::Lifo => waiters.pop_front().unwrap(),
+            };
+
+            // Safety: we never make mutable references to waiters.
+            let waiter = unsafe { waiter.as_ref() };
+
+            // Safety: we hold the lock, so we can access the waker.
+            let waker = unsafe { waiter.waker.with_mut(|waker| (*waker).take()) };
+
+            // This waiter is unlinked and will not be shared ever again, release it.
+            waiter
+                .notification
+                .store_release(Notification::One(strategy));
+
+            if waiters.is_empty() {
+                // As this the **final** waiter in the list, the state
+                // must be transitioned to `EMPTY`. As transitioning
+                // **from** `WAITING` requires the lock to be held, a
+                // `store` is sufficient.
+                state.store(set_state(curr, EMPTY), SeqCst);
+            }
+            waker
+        }
+        _ => unreachable!(),
     }
 }
 
@@ -867,9 +991,7 @@ impl Notified<'_> {
         self.poll_notified(None).is_ready()
     }
 
-    /// A custom `project` implementation is used in place of `pin-project-lite`
-    /// as a custom drop implementation is needed.
-    fn project(self: Pin<&mut Self>) -> (&Notify, &mut State, &usize, &Waiter) {
+    fn project(self: Pin<&mut Self>) -> NotifiedProject<'_> {
         unsafe {
             // Safety: `notify`, `state` and `notify_waiters_calls` are `Unpin`.
 
@@ -878,17 +1000,102 @@ impl Notified<'_> {
             is_unpin::<usize>();
 
             let me = self.get_unchecked_mut();
-            (
-                me.notify,
-                &mut me.state,
-                &me.notify_waiters_calls,
-                &me.waiter,
-            )
+            NotifiedProject {
+                notify: me.notify,
+                state: &mut me.state,
+                notify_waiters_calls: &me.notify_waiters_calls,
+                waiter: &me.waiter,
+            }
         }
     }
 
     fn poll_notified(self: Pin<&mut Self>, waker: Option<&Waker>) -> Poll<()> {
-        let (notify, state, notify_waiters_calls, waiter) = self.project();
+        self.project().poll_notified(waker)
+    }
+}
+
+impl Future for Notified<'_> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        self.poll_notified(Some(cx.waker()))
+    }
+}
+
+impl Drop for Notified<'_> {
+    fn drop(&mut self) {
+        // Safety: The type only transitions to a "Waiting" state when pinned.
+        unsafe { Pin::new_unchecked(self) }
+            .project()
+            .drop_notified();
+    }
+}
+
+// ===== impl OwnedNotified =====
+
+impl OwnedNotified {
+    /// Adds this future to the list of futures that are ready to receive
+    /// wakeups from calls to [`notify_one`].
+    ///
+    /// See [`Notified::enable`] for more details.
+    ///
+    /// [`notify_one`]: Notify::notify_one()
+    pub fn enable(self: Pin<&mut Self>) -> bool {
+        self.poll_notified(None).is_ready()
+    }
+
+    /// A custom `project` implementation is used in place of `pin-project-lite`
+    /// as a custom drop implementation is needed.
+    fn project(self: Pin<&mut Self>) -> NotifiedProject<'_> {
+        unsafe {
+            // Safety: `notify`, `state` and `notify_waiters_calls` are `Unpin`.
+
+            is_unpin::<&Notify>();
+            is_unpin::<State>();
+            is_unpin::<usize>();
+
+            let me = self.get_unchecked_mut();
+            NotifiedProject {
+                notify: &me.notify,
+                state: &mut me.state,
+                notify_waiters_calls: &me.notify_waiters_calls,
+                waiter: &me.waiter,
+            }
+        }
+    }
+
+    fn poll_notified(self: Pin<&mut Self>, waker: Option<&Waker>) -> Poll<()> {
+        self.project().poll_notified(waker)
+    }
+}
+
+impl Future for OwnedNotified {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        self.poll_notified(Some(cx.waker()))
+    }
+}
+
+impl Drop for OwnedNotified {
+    fn drop(&mut self) {
+        // Safety: The type only transitions to a "Waiting" state when pinned.
+        unsafe { Pin::new_unchecked(self) }
+            .project()
+            .drop_notified();
+    }
+}
+
+// ===== impl NotifiedProject =====
+
+impl NotifiedProject<'_> {
+    fn poll_notified(self, waker: Option<&Waker>) -> Poll<()> {
+        let NotifiedProject {
+            notify,
+            state,
+            notify_waiters_calls,
+            waiter,
+        } = self;
 
         'outer_loop: loop {
             match *state {
@@ -998,7 +1205,7 @@ impl Notified<'_> {
                     #[cfg(tokio_taskdump)]
                     if let Some(waker) = waker {
                         let mut ctx = Context::from_waker(waker);
-                        ready!(crate::trace::trace_leaf(&mut ctx));
+                        std::task::ready!(crate::trace::trace_leaf(&mut ctx));
                     }
 
                     if waiter.notification.load(Acquire).is_some() {
@@ -1065,7 +1272,7 @@ impl Notified<'_> {
                                         None => true,
                                     };
                                     if should_update {
-                                        old_waker = std::mem::replace(&mut *v, Some(waker.clone()));
+                                        old_waker = (*v).replace(waker.clone());
                                     }
                                 }
                             });
@@ -1092,27 +1299,21 @@ impl Notified<'_> {
                     #[cfg(tokio_taskdump)]
                     if let Some(waker) = waker {
                         let mut ctx = Context::from_waker(waker);
-                        ready!(crate::trace::trace_leaf(&mut ctx));
+                        std::task::ready!(crate::trace::trace_leaf(&mut ctx));
                     }
                     return Poll::Ready(());
                 }
             }
         }
     }
-}
 
-impl Future for Notified<'_> {
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        self.poll_notified(Some(cx.waker()))
-    }
-}
-
-impl Drop for Notified<'_> {
-    fn drop(&mut self) {
-        // Safety: The type only transitions to a "Waiting" state when pinned.
-        let (notify, state, _, waiter) = unsafe { Pin::new_unchecked(self).project() };
+    fn drop_notified(self) {
+        let NotifiedProject {
+            notify,
+            state,
+            waiter,
+            ..
+        } = self;
 
         // This is where we ensure safety. The `Notified` value is being
         // dropped, which means we must ensure that the waiter entry is no
@@ -1140,8 +1341,10 @@ impl Drop for Notified<'_> {
             // See if the node was notified but not received. In this case, if
             // the notification was triggered via `notify_one`, it must be sent
             // to the next waiter.
-            if notification == Some(Notification::One) {
-                if let Some(waker) = notify_locked(&mut waiters, &notify.state, notify_state) {
+            if let Some(Notification::One(strategy)) = notification {
+                if let Some(waker) =
+                    notify_locked(&mut waiters, &notify.state, notify_state, strategy)
+                {
                     drop(waiters);
                     waker.wake();
                 }

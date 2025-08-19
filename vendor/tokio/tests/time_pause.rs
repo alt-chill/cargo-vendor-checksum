@@ -1,5 +1,6 @@
 #![warn(rust_2018_idioms)]
 #![cfg(feature = "full")]
+#![cfg(not(miri))] // Too slow on miri.
 
 use rand::SeedableRng;
 use rand::{rngs::StdRng, Rng};
@@ -36,6 +37,7 @@ async fn pause_time_in_main_threads() {
     tokio::time::pause();
 }
 
+#[cfg_attr(panic = "abort", ignore)]
 #[cfg(all(feature = "full", not(target_os = "wasi")))] // Wasi doesn't support threads
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn pause_time_in_spawn_threads() {
@@ -61,7 +63,7 @@ async fn paused_time_stress_run() -> Vec<Duration> {
     let mut times = vec![];
     let start = Instant::now();
     for _ in 0..10_000 {
-        let sleep = rng.gen_range(Duration::from_secs(0)..Duration::from_secs(1));
+        let sleep = rng.random_range(Duration::from_secs(0)..Duration::from_secs(1));
         time::sleep(sleep).await;
         times.push(start.elapsed());
     }

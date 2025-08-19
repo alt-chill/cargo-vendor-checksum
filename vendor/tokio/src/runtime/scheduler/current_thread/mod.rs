@@ -1,22 +1,26 @@
-use crate::future::poll_fn;
 use crate::loom::sync::atomic::AtomicBool;
 use crate::loom::sync::Arc;
 use crate::runtime::driver::{self, Driver};
 use crate::runtime::scheduler::{self, Defer, Inject};
-use crate::runtime::task::{self, JoinHandle, OwnedTasks, Schedule, Task};
-use crate::runtime::{blocking, context, Config, MetricsBatch, SchedulerMetrics, WorkerMetrics};
+use crate::runtime::task::{
+    self, JoinHandle, OwnedTasks, Schedule, SpawnLocation, Task, TaskHarnessScheduleHooks,
+};
+use crate::runtime::{
+    blocking, context, Config, MetricsBatch, SchedulerMetrics, TaskHooks, TaskMeta, WorkerMetrics,
+};
 use crate::sync::notify::Notify;
 use crate::util::atomic_cell::AtomicCell;
 use crate::util::{waker_ref, RngSeedGenerator, Wake, WakerRef};
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::fmt;
-use std::future::Future;
+use std::future::{poll_fn, Future};
 use std::sync::atomic::Ordering::{AcqRel, Release};
 use std::task::Poll::{Pending, Ready};
 use std::task::Waker;
+use std::thread::ThreadId;
 use std::time::Duration;
+use std::{fmt, thread};
 
 /// Executes tasks on the current thread
 pub(crate) struct CurrentThread {
@@ -41,6 +45,12 @@ pub(crate) struct Handle {
 
     /// Current random number generator seed
     pub(crate) seed_generator: RngSeedGenerator,
+
+    /// User-supplied hooks to invoke for things
+    pub(crate) task_hooks: TaskHooks,
+
+    /// If this is a `LocalRuntime`, flags the owning thread ID.
+    pub(crate) local_tid: Option<ThreadId>,
 }
 
 /// Data required for executing the scheduler. The struct is passed around to
@@ -121,8 +131,10 @@ impl CurrentThread {
         blocking_spawner: blocking::Spawner,
         seed_generator: RngSeedGenerator,
         config: Config,
+        local_tid: Option<ThreadId>,
     ) -> (CurrentThread, Arc<Handle>) {
         let worker_metrics = WorkerMetrics::from_config(&config);
+        worker_metrics.set_thread_id(thread::current().id());
 
         // Get the configured global queue interval, or use the default.
         let global_queue_interval = config
@@ -130,9 +142,17 @@ impl CurrentThread {
             .unwrap_or(DEFAULT_GLOBAL_QUEUE_INTERVAL);
 
         let handle = Arc::new(Handle {
+            task_hooks: TaskHooks {
+                task_spawn_callback: config.before_spawn.clone(),
+                task_terminate_callback: config.after_termination.clone(),
+                #[cfg(tokio_unstable)]
+                before_poll_callback: config.before_poll.clone(),
+                #[cfg(tokio_unstable)]
+                after_poll_callback: config.after_poll.clone(),
+            },
             shared: Shared {
                 inject: Inject::new(),
-                owned: OwnedTasks::new(),
+                owned: OwnedTasks::new(1),
                 woken: AtomicBool::new(false),
                 config,
                 scheduler_metrics: SchedulerMetrics::new(),
@@ -141,6 +161,7 @@ impl CurrentThread {
             driver: driver_handle,
             blocking_spawner,
             seed_generator,
+            local_tid,
         });
 
         let core = AtomicCell::new(Some(Box::new(Core {
@@ -172,6 +193,10 @@ impl CurrentThread {
             // available or the future is complete.
             loop {
                 if let Some(core) = self.take_core(handle) {
+                    handle
+                        .shared
+                        .worker_metrics
+                        .set_thread_id(thread::current().id());
                     return core.block_on(future);
                 } else {
                     let notified = self.notify.notified();
@@ -248,7 +273,7 @@ fn shutdown2(mut core: Box<Core>, handle: &Handle) -> Box<Core> {
     // Drain the OwnedTasks collection. This call also closes the
     // collection, ensuring that no tasks are ever pushed after this
     // call returns.
-    handle.shared.owned.close_and_shutdown_all();
+    handle.shared.owned.close_and_shutdown_all(0);
 
     // Drain local queue
     // We already shut down every task, so we just need to drop the task.
@@ -340,7 +365,7 @@ impl Context {
     /// thread-local context.
     fn run_task<R>(&self, mut core: Box<Core>, f: impl FnOnce() -> R) -> (Box<Core>, R) {
         core.metrics.start_poll();
-        let mut ret = self.enter(core, || crate::runtime::coop::budget(f));
+        let mut ret = self.enter(core, || crate::task::coop::budget(f));
         ret.0.metrics.end_poll();
         ret
     }
@@ -351,10 +376,7 @@ impl Context {
         let mut driver = core.driver.take().expect("driver missing");
 
         if let Some(f) = &handle.shared.config.before_park {
-            // Incorrect lint, the closures are actually different types so `f`
-            // cannot be passed as an argument to `enter`.
-            #[allow(clippy::redundant_closure)]
-            let (c, _) = self.enter(core, || f());
+            let (c, ()) = self.enter(core, || f());
             core = c;
         }
 
@@ -365,19 +387,19 @@ impl Context {
             core.metrics.about_to_park();
             core.submit_metrics(handle);
 
-            let (c, _) = self.enter(core, || {
+            let (c, ()) = self.enter(core, || {
                 driver.park(&handle.driver);
                 self.defer.wake();
             });
 
             core = c;
+
+            core.metrics.unparked();
+            core.submit_metrics(handle);
         }
 
         if let Some(f) = &handle.shared.config.after_unpark {
-            // Incorrect lint, the closures are actually different types so `f`
-            // cannot be passed as an argument to `enter`.
-            #[allow(clippy::redundant_closure)]
-            let (c, _) = self.enter(core, || f());
+            let (c, ()) = self.enter(core, || f());
             core = c;
         }
 
@@ -391,7 +413,7 @@ impl Context {
 
         core.submit_metrics(handle);
 
-        let (mut core, _) = self.enter(core, || {
+        let (mut core, ()) = self.enter(core, || {
             driver.park_timeout(&handle.driver, Duration::from_millis(0));
             self.defer.wake();
         });
@@ -423,16 +445,59 @@ impl Context {
 
 impl Handle {
     /// Spawns a future onto the `CurrentThread` scheduler
+    #[track_caller]
     pub(crate) fn spawn<F>(
         me: &Arc<Self>,
         future: F,
         id: crate::runtime::task::Id,
+        spawned_at: SpawnLocation,
     ) -> JoinHandle<F::Output>
     where
         F: crate::future::Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        let (handle, notified) = me.shared.owned.bind(future, me.clone(), id);
+        let (handle, notified) = me.shared.owned.bind(future, me.clone(), id, spawned_at);
+
+        me.task_hooks.spawn(&TaskMeta {
+            id,
+            spawned_at,
+            _phantom: Default::default(),
+        });
+
+        if let Some(notified) = notified {
+            me.schedule(notified);
+        }
+
+        handle
+    }
+
+    /// Spawn a task which isn't safe to send across thread boundaries onto the runtime.
+    ///
+    /// # Safety
+    /// This should only be used when this is a `LocalRuntime` or in another case where the runtime
+    /// provably cannot be driven from or moved to different threads from the one on which the task
+    /// is spawned.
+    #[track_caller]
+    pub(crate) unsafe fn spawn_local<F>(
+        me: &Arc<Self>,
+        future: F,
+        id: crate::runtime::task::Id,
+        spawned_at: SpawnLocation,
+    ) -> JoinHandle<F::Output>
+    where
+        F: crate::future::Future + 'static,
+        F::Output: 'static,
+    {
+        let (handle, notified) = me
+            .shared
+            .owned
+            .bind_local(future, me.clone(), id, spawned_at);
+
+        me.task_hooks.spawn(&TaskMeta {
+            id,
+            spawned_at,
+            _phantom: Default::default(),
+        });
 
         if let Some(notified) = notified {
             me.schedule(notified);
@@ -476,7 +541,7 @@ impl Handle {
 
             traces = trace_current_thread(&self.shared.owned, local, &self.shared.inject)
                 .into_iter()
-                .map(dump::Task::new)
+                .map(|(id, trace)| dump::Task::new(id, trace))
                 .collect();
 
             // Avoid double borrow panic
@@ -506,21 +571,25 @@ impl Handle {
     pub(crate) fn reset_woken(&self) -> bool {
         self.shared.woken.swap(false, AcqRel)
     }
+
+    pub(crate) fn num_alive_tasks(&self) -> usize {
+        self.shared.owned.num_alive_tasks()
+    }
+
+    pub(crate) fn injection_queue_depth(&self) -> usize {
+        self.shared.inject.len()
+    }
+
+    pub(crate) fn worker_metrics(&self, worker: usize) -> &WorkerMetrics {
+        assert_eq!(0, worker);
+        &self.shared.worker_metrics
+    }
 }
 
-cfg_metrics! {
+cfg_unstable_metrics! {
     impl Handle {
         pub(crate) fn scheduler_metrics(&self) -> &SchedulerMetrics {
             &self.shared.scheduler_metrics
-        }
-
-        pub(crate) fn injection_queue_depth(&self) -> usize {
-            self.shared.inject.len()
-        }
-
-        pub(crate) fn worker_metrics(&self, worker: usize) -> &WorkerMetrics {
-            assert_eq!(0, worker);
-            &self.shared.worker_metrics
         }
 
         pub(crate) fn worker_local_queue_depth(&self, worker: usize) -> usize {
@@ -539,8 +608,10 @@ cfg_metrics! {
             self.blocking_spawner.queue_depth()
         }
 
-        pub(crate) fn active_tasks_count(&self) -> usize {
-            self.shared.owned.active_tasks_count()
+        cfg_64bit_metrics! {
+            pub(crate) fn spawned_tasks_count(&self) -> u64 {
+                self.shared.owned.spawned_tasks_count()
+            }
         }
     }
 }
@@ -592,6 +663,12 @@ impl Schedule for Arc<Handle> {
         });
     }
 
+    fn hooks(&self) -> TaskHarnessScheduleHooks {
+        TaskHarnessScheduleHooks {
+            task_terminate_callback: self.task_hooks.task_terminate_callback.clone(),
+        }
+    }
+
     cfg_unstable! {
         fn unhandled_panic(&self) {
             use crate::runtime::UnhandledPanic;
@@ -614,7 +691,7 @@ impl Schedule for Arc<Handle> {
                             // If `None`, the runtime is shutting down, so there is no need to signal shutdown
                             if let Some(core) = core.as_mut() {
                                 core.unhandled_panic = true;
-                                self.shared.owned.close_and_shutdown_all();
+                                self.shared.owned.close_and_shutdown_all(0);
                             }
                         }
                         _ => unreachable!("runtime core not set in CURRENT thread-local"),
@@ -627,7 +704,7 @@ impl Schedule for Arc<Handle> {
 
 impl Wake for Handle {
     fn wake(arc_self: Arc<Self>) {
-        Wake::wake_by_ref(&arc_self)
+        Wake::wake_by_ref(&arc_self);
     }
 
     /// Wake by reference
@@ -662,7 +739,7 @@ impl CoreGuard<'_> {
 
                 if handle.reset_woken() {
                     let (c, res) = context.enter(core, || {
-                        crate::runtime::coop::budget(|| future.as_mut().poll(&mut cx))
+                        crate::task::coop::budget(|| future.as_mut().poll(&mut cx))
                     });
 
                     core = c;
@@ -702,8 +779,17 @@ impl CoreGuard<'_> {
 
                     let task = context.handle.shared.owned.assert_owner(task);
 
-                    let (c, _) = context.run_task(core, || {
+                    #[cfg(tokio_unstable)]
+                    let task_meta = task.task_meta();
+
+                    let (c, ()) = context.run_task(core, || {
+                        #[cfg(tokio_unstable)]
+                        context.handle.task_hooks.poll_start_callback(&task_meta);
+
                         task.run();
+
+                        #[cfg(tokio_unstable)]
+                        context.handle.task_hooks.poll_stop_callback(&task_meta);
                     });
 
                     core = c;
@@ -758,7 +844,7 @@ impl Drop for CoreGuard<'_> {
             self.scheduler.core.set(core);
 
             // Wake up other possible threads that could steal the driver.
-            self.scheduler.notify.notify_one()
+            self.scheduler.notify.notify_one();
         }
     }
 }

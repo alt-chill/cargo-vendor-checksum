@@ -278,7 +278,7 @@
 //!
 //! ## `watch` channel
 //!
-//! The [`watch` channel] supports sending **many** values from a **single**
+//! The [`watch` channel] supports sending **many** values from a **many**
 //! producer to **many** consumers. However, only the **most recent** value is
 //! stored in the channel. Consumers are notified when a new value is sent, but
 //! there is no guarantee that consumers will see **all** values.
@@ -431,11 +431,25 @@
 //!   number of permits, which tasks may request in order to enter a critical
 //!   section. Semaphores are useful for implementing limiting or bounding of
 //!   any kind.
+//!
+//! # Runtime compatibility
+//!
+//! All synchronization primitives provided in this module are runtime agnostic.
+//! You can freely move them between different instances of the Tokio runtime
+//! or even use them from non-Tokio runtimes.
+//!
+//! When used in a Tokio runtime, the synchronization primitives participate in
+//! [cooperative scheduling](crate::task::coop#cooperative-scheduling) to avoid
+//! starvation. This feature does not apply when used from non-Tokio runtimes.
+//!
+//! As an exception, methods ending in `_timeout` are not runtime agnostic
+//! because they require access to the Tokio timer. See the documentation of
+//! each `*_timeout` method for more information on its use.
 
 cfg_sync! {
     /// Named future types.
     pub mod futures {
-        pub use super::notify::Notified;
+        pub use super::notify::{Notified, OwnedNotified};
     }
 
     mod barrier;
@@ -473,6 +487,9 @@ cfg_sync! {
 
     mod once_cell;
     pub use self::once_cell::{OnceCell, SetError};
+
+    mod set_once;
+    pub use self::set_once::{SetOnce, SetOnceError};
 
     pub mod watch;
 }

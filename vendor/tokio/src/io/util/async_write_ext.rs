@@ -117,6 +117,7 @@ cfg_io_util! {
         ///
         ///     // Writes some prefix of the byte string, not necessarily all of it.
         ///     file.write(b"some bytes").await?;
+        ///     file.flush().await?;
         ///     Ok(())
         /// }
         /// ```
@@ -162,6 +163,7 @@ cfg_io_util! {
         ///     ];
         ///
         ///     file.write_vectored(&bufs).await?;
+        ///     file.flush().await?;
         ///
         ///     Ok(())
         /// }
@@ -244,6 +246,7 @@ cfg_io_util! {
         ///         // all of it.
         ///         file.write_buf(&mut buffer).await?;
         ///     }
+        ///     file.flush().await?;
         ///
         ///     Ok(())
         /// }
@@ -307,6 +310,7 @@ cfg_io_util! {
         ///     let mut buffer = Cursor::new(b"data to write");
         ///
         ///     file.write_all_buf(&mut buffer).await?;
+        ///     file.flush().await?;
         ///     Ok(())
         /// }
         /// ```
@@ -356,6 +360,7 @@ cfg_io_util! {
         ///     let mut file = File::create("foo.txt").await?;
         ///
         ///     file.write_all(b"some bytes").await?;
+        ///     file.flush().await?;
         ///     Ok(())
         /// }
         /// ```
@@ -1225,6 +1230,16 @@ cfg_io_util! {
         ///
         /// It is considered an error if not all bytes could be written due to
         /// I/O errors or EOF being reached.
+        ///
+        /// # Cancel safety
+        ///
+        /// This method is cancel safe.
+        ///
+        /// If `flush` is used as the event in a [`tokio::select!`](crate::select)
+        /// statement and some other branch completes first, then the data in the
+        /// buffered data in this `AsyncWrite` may have been partially flushed.
+        /// However, it is guaranteed that the buffer is advanced by the amount of
+        /// bytes that have been partially flushed.
         ///
         /// # Examples
         ///

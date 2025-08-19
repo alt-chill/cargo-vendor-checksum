@@ -31,14 +31,14 @@
 //!
 //! The benefits of integrating `structopt` and `clap` are:
 //! - Easier cross-linking in documentation
-//! - [Documentation parity](../examples)
+//! - Documentation parity
 //! - Tighter design feedback loop, ensuring all new features are designed with
 //!   derives in mind and easier to change `clap` in response to `structopt` bugs.
 //! - Clearer endorsement of `structopt`
 //!
 //! See also
-//! - [`clap` v3 CHANGELOG](../CHANGELOG.md#300---2021-12-31)
-//! - [`structopt` migration guide](../CHANGELOG.md#migrate-structopt)
+//! - [`clap` v3 CHANGELOG](https://github.com/clap-rs/clap/blob/v3-master/CHANGELOG.md#300---2021-12-31)
+//! - [`structopt` migration guide](https://github.com/clap-rs/clap/blob/v3-master/CHANGELOG.md#migrate-structopt)
 //!
 //! #### What are some reasons to use `clap`? (The Pitch)
 //!
@@ -69,7 +69,7 @@
 //!
 //! There are also experiments with other APIs:
 //! - [fncmd](https://github.com/yuhr/fncmd): function attribute
-//! - [clap-serde](https://github.com/aobatact/clap-serde): create an `Command` from a deserializer
+//! - [clap-serde](https://github.com/aobatact/clap-serde): create a `Command` from a deserializer
 //!
 //! ### When should I use the builder vs derive APIs?
 //!
@@ -80,7 +80,7 @@
 //!
 //! The [Builder API][crate::_tutorial] is a lower-level API that someone might want to use for
 //! - Faster compile times if you aren't already using other procedural macros
-//! - More flexibility, e.g. you can look up an [arguments values][crate::ArgMatches::get_many],
+//! - More flexibility, e.g. you can look up the [argument's values][crate::ArgMatches::get_many],
 //!   their [ordering with other arguments][crate::ArgMatches::indices_of], and [what set
 //!   them][crate::ArgMatches::value_source].  The Derive API can only report values and not
 //!   indices of or other data.

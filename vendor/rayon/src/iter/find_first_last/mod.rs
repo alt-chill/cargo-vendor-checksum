@@ -14,9 +14,9 @@ mod test;
 //
 // To solve this, we assign each consumer a lower and upper bound for an
 // imaginary "range" of data that it consumes. The initial consumer starts with
-// the range 0..usize::max_value(). The split divides this range in half so that
-// one resulting consumer has the range 0..(usize::max_value() / 2), and the
-// other has (usize::max_value() / 2)..usize::max_value(). Every subsequent
+// the range 0..usize::MAX. The split divides this range in half so that
+// one resulting consumer has the range 0..(usize::MAX / 2), and the
+// other has (usize::MAX / 2)..usize::max_value(). Every subsequent
 // split divides the range in half again until it cannot be split anymore
 // (i.e. its length is 1), in which case the split returns two consumers with
 // the same range. In that case both consumers will continue to consume all
@@ -43,7 +43,7 @@ where
     I: ParallelIterator,
     P: Fn(&I::Item) -> bool + Sync,
 {
-    let best_found = AtomicUsize::new(usize::max_value());
+    let best_found = AtomicUsize::new(usize::MAX);
     let consumer = FindConsumer::new(&find_op, MatchPosition::Leftmost, &best_found);
     pi.drive_unindexed(consumer)
 }
@@ -71,7 +71,7 @@ impl<'p, P> FindConsumer<'p, P> {
         FindConsumer {
             find_op,
             lower_bound: Cell::new(0),
-            upper_bound: usize::max_value(),
+            upper_bound: usize::MAX,
             match_position,
             best_found,
         }
@@ -181,25 +181,17 @@ impl<'p, P: 'p + Fn(&T) -> bool, T> Folder<T> for FindFolder<'p, T, P> {
         };
 
         if !found_best_in_range && (self.find_op)(&item) {
-            // Continuously try to set best_found until we succeed or we
-            // discover a better match was already found.
-            let mut current = self.best_found.load(Ordering::Relaxed);
-            loop {
-                if better_position(current, self.boundary, self.match_position) {
-                    break;
-                }
-                match self.best_found.compare_exchange_weak(
-                    current,
-                    self.boundary,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                ) {
-                    Ok(_) => {
-                        self.item = Some(item);
-                        break;
-                    }
-                    Err(v) => current = v,
-                }
+            // Update the best found index if ours is better.
+            let update =
+                self.best_found
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                        better_position(self.boundary, current, self.match_position)
+                            .then_some(self.boundary)
+                    });
+
+            // Save this item if our index was better or equal.
+            if update.is_ok() || update == Err(self.boundary) {
+                self.item = Some(item);
             }
         }
         self

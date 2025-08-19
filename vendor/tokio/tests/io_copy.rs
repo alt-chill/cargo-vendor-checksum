@@ -2,12 +2,11 @@
 #![cfg(feature = "full")]
 
 use bytes::BytesMut;
-use futures::ready;
 use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio_test::assert_ok;
 
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::task::{ready, Context, Poll};
 
 #[tokio::test]
 async fn copy() {
@@ -84,4 +83,19 @@ async fn proxy() {
     let n = assert_ok!(io::copy(&mut rd, &mut wd).await);
 
     assert_eq!(n, 1024);
+}
+
+#[tokio::test]
+async fn copy_is_cooperative() {
+    tokio::select! {
+        biased;
+        _ = async {
+            loop {
+                let mut reader: &[u8] = b"hello";
+                let mut writer: Vec<u8> = vec![];
+                let _ = io::copy(&mut reader, &mut writer).await;
+            }
+        } => {},
+        _ = tokio::task::yield_now() => {}
+    }
 }

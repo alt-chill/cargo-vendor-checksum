@@ -31,7 +31,7 @@ pub struct WinconBytesIter<'s> {
     capture: &'s mut WinconCapture,
 }
 
-impl<'s> Iterator for WinconBytesIter<'s> {
+impl Iterator for WinconBytesIter<'_> {
     type Item = (anstyle::Style, String);
 
     #[inline]
@@ -105,79 +105,112 @@ impl anstyle_parse::Perform for WinconCapture {
         }
 
         let mut style = self.style;
+        // param/value differences are dependent on the escape code
+        let mut state = CsiState::Normal;
+        let mut r = None;
+        let mut g = None;
+        let mut color_target = ColorTarget::Fg;
         for param in params {
-            let mut state = State::Normal;
-            let mut r = None;
-            let mut g = None;
-            let mut is_bg = false;
             for value in param {
                 match (state, *value) {
-                    (State::Normal, 0) => {
+                    (CsiState::Normal, 0) => {
                         style = anstyle::Style::default();
                         break;
                     }
-                    (State::Normal, 1) => {
+                    (CsiState::Normal, 1) => {
                         style = style.bold();
                         break;
                     }
-                    (State::Normal, 4) => {
-                        style = style.underline();
+                    (CsiState::Normal, 2) => {
+                        style = style.dimmed();
                         break;
                     }
-                    (State::Normal, 30..=37) => {
-                        let color = to_ansi_color(value - 30).unwrap();
+                    (CsiState::Normal, 3) => {
+                        style = style.italic();
+                        break;
+                    }
+                    (CsiState::Normal, 4) => {
+                        style = style.underline();
+                        state = CsiState::Underline;
+                    }
+                    (CsiState::Normal, 21) => {
+                        style |= anstyle::Effects::DOUBLE_UNDERLINE;
+                        break;
+                    }
+                    (CsiState::Normal, 7) => {
+                        style = style.invert();
+                        break;
+                    }
+                    (CsiState::Normal, 8) => {
+                        style = style.hidden();
+                        break;
+                    }
+                    (CsiState::Normal, 9) => {
+                        style = style.strikethrough();
+                        break;
+                    }
+                    (CsiState::Normal, 30..=37) => {
+                        let color = to_ansi_color(value - 30).expect("within 4-bit range");
                         style = style.fg_color(Some(color.into()));
                         break;
                     }
-                    (State::Normal, 38) => {
-                        is_bg = false;
-                        state = State::PrepareCustomColor;
+                    (CsiState::Normal, 38) => {
+                        color_target = ColorTarget::Fg;
+                        state = CsiState::PrepareCustomColor;
                     }
-                    (State::Normal, 39) => {
+                    (CsiState::Normal, 39) => {
                         style = style.fg_color(None);
                         break;
                     }
-                    (State::Normal, 40..=47) => {
-                        let color = to_ansi_color(value - 40).unwrap();
+                    (CsiState::Normal, 40..=47) => {
+                        let color = to_ansi_color(value - 40).expect("within 4-bit range");
                         style = style.bg_color(Some(color.into()));
                         break;
                     }
-                    (State::Normal, 48) => {
-                        is_bg = true;
-                        state = State::PrepareCustomColor;
+                    (CsiState::Normal, 48) => {
+                        color_target = ColorTarget::Bg;
+                        state = CsiState::PrepareCustomColor;
                     }
-                    (State::Normal, 49) => {
+                    (CsiState::Normal, 49) => {
                         style = style.bg_color(None);
                         break;
                     }
-                    (State::Normal, 90..=97) => {
-                        let color = to_ansi_color(value - 90).unwrap().bright(true);
+                    (CsiState::Normal, 58) => {
+                        color_target = ColorTarget::Underline;
+                        state = CsiState::PrepareCustomColor;
+                    }
+                    (CsiState::Normal, 90..=97) => {
+                        let color = to_ansi_color(value - 90)
+                            .expect("within 4-bit range")
+                            .bright(true);
                         style = style.fg_color(Some(color.into()));
                         break;
                     }
-                    (State::Normal, 100..=107) => {
-                        let color = to_ansi_color(value - 100).unwrap().bright(true);
+                    (CsiState::Normal, 100..=107) => {
+                        let color = to_ansi_color(value - 100)
+                            .expect("within 4-bit range")
+                            .bright(true);
                         style = style.bg_color(Some(color.into()));
                         break;
                     }
-                    (State::PrepareCustomColor, 5) => {
-                        state = State::Ansi256;
+                    (CsiState::PrepareCustomColor, 5) => {
+                        state = CsiState::Ansi256;
                     }
-                    (State::PrepareCustomColor, 2) => {
-                        state = State::Rgb;
+                    (CsiState::PrepareCustomColor, 2) => {
+                        state = CsiState::Rgb;
                         r = None;
                         g = None;
                     }
-                    (State::Ansi256, n) => {
+                    (CsiState::Ansi256, n) => {
                         let color = anstyle::Ansi256Color(n as u8);
-                        if is_bg {
-                            style = style.bg_color(Some(color.into()));
-                        } else {
-                            style = style.fg_color(Some(color.into()));
-                        }
+                        style = match color_target {
+                            ColorTarget::Fg => style.fg_color(Some(color.into())),
+                            ColorTarget::Bg => style.bg_color(Some(color.into())),
+                            ColorTarget::Underline => style.underline_color(Some(color.into())),
+                        };
                         break;
                     }
-                    (State::Rgb, b) => match (r, g) {
+                    (CsiState::Rgb, b) => match (r, g) {
                         (None, _) => {
                             r = Some(b);
                         }
@@ -186,14 +219,41 @@ impl anstyle_parse::Perform for WinconCapture {
                         }
                         (Some(r), Some(g)) => {
                             let color = anstyle::RgbColor(r as u8, g as u8, b as u8);
-                            if is_bg {
-                                style = style.bg_color(Some(color.into()));
-                            } else {
-                                style = style.fg_color(Some(color.into()));
-                            }
+                            style = match color_target {
+                                ColorTarget::Fg => style.fg_color(Some(color.into())),
+                                ColorTarget::Bg => style.bg_color(Some(color.into())),
+                                ColorTarget::Underline => style.underline_color(Some(color.into())),
+                            };
                             break;
                         }
                     },
+                    (CsiState::Underline, 0) => {
+                        style =
+                            style.effects(style.get_effects().remove(anstyle::Effects::UNDERLINE));
+                    }
+                    (CsiState::Underline, 1) => {
+                        // underline already set
+                    }
+                    (CsiState::Underline, 2) => {
+                        style = style
+                            .effects(style.get_effects().remove(anstyle::Effects::UNDERLINE))
+                            | anstyle::Effects::DOUBLE_UNDERLINE;
+                    }
+                    (CsiState::Underline, 3) => {
+                        style = style
+                            .effects(style.get_effects().remove(anstyle::Effects::UNDERLINE))
+                            | anstyle::Effects::CURLY_UNDERLINE;
+                    }
+                    (CsiState::Underline, 4) => {
+                        style = style
+                            .effects(style.get_effects().remove(anstyle::Effects::UNDERLINE))
+                            | anstyle::Effects::DOTTED_UNDERLINE;
+                    }
+                    (CsiState::Underline, 5) => {
+                        style = style
+                            .effects(style.get_effects().remove(anstyle::Effects::UNDERLINE))
+                            | anstyle::Effects::DASHED_UNDERLINE;
+                    }
                     _ => {
                         break;
                     }
@@ -209,11 +269,19 @@ impl anstyle_parse::Perform for WinconCapture {
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
-enum State {
+enum CsiState {
     Normal,
     PrepareCustomColor,
     Ansi256,
     Rgb,
+    Underline,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum ColorTarget {
+    Fg,
+    Bg,
+    Underline,
 }
 
 fn to_ansi_color(digit: u16) -> Option<anstyle::AnsiColor> {
@@ -233,7 +301,6 @@ fn to_ansi_color(digit: u16) -> Option<anstyle::AnsiColor> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use owo_colors::OwoColorize as _;
     use proptest::prelude::*;
 
     #[track_caller]
@@ -244,17 +311,15 @@ mod test {
             .collect::<Vec<_>>();
         let mut state = WinconBytes::new();
         let actual = state.extract_next(input.as_bytes()).collect::<Vec<_>>();
-        assert_eq!(expected, actual);
+        assert_eq!(expected, actual, "{input:?}");
     }
 
     #[test]
     fn start() {
-        let input = format!("{} world!", "Hello".green().on_red());
+        let green_on_red = anstyle::AnsiColor::Green.on(anstyle::AnsiColor::Red);
+        let input = format!("{green_on_red}Hello{green_on_red:#} world!");
         let expected = vec![
-            (
-                anstyle::AnsiColor::Green.on(anstyle::AnsiColor::Red),
-                "Hello",
-            ),
+            (green_on_red, "Hello"),
             (anstyle::Style::default(), " world!"),
         ];
         verify(&input, expected);
@@ -262,13 +327,11 @@ mod test {
 
     #[test]
     fn middle() {
-        let input = format!("Hello {}!", "world".green().on_red());
+        let green_on_red = anstyle::AnsiColor::Green.on(anstyle::AnsiColor::Red);
+        let input = format!("Hello {green_on_red}world{green_on_red:#}!");
         let expected = vec![
             (anstyle::Style::default(), "Hello "),
-            (
-                anstyle::AnsiColor::Green.on(anstyle::AnsiColor::Red),
-                "world",
-            ),
+            (green_on_red, "world"),
             (anstyle::Style::default(), "!"),
         ];
         verify(&input, expected);
@@ -276,13 +339,24 @@ mod test {
 
     #[test]
     fn end() {
-        let input = format!("Hello {}", "world!".green().on_red());
+        let green_on_red = anstyle::AnsiColor::Green.on(anstyle::AnsiColor::Red);
+        let input = format!("Hello {green_on_red}world!{green_on_red:#}");
         let expected = vec![
             (anstyle::Style::default(), "Hello "),
-            (
-                anstyle::AnsiColor::Green.on(anstyle::AnsiColor::Red),
-                "world!",
-            ),
+            (green_on_red, "world!"),
+        ];
+        verify(&input, expected);
+    }
+
+    #[test]
+    fn ansi256_colors() {
+        let ansi_11 = anstyle::Ansi256Color(11).on_default();
+        // termcolor only supports "brights" via these
+        let input = format!("Hello {ansi_11}world{ansi_11:#}!");
+        let expected = vec![
+            (anstyle::Style::default(), "Hello "),
+            (ansi_11, "world"),
+            (anstyle::Style::default(), "!"),
         ];
         verify(&input, expected);
     }

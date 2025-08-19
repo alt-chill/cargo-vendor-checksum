@@ -61,20 +61,16 @@ impl Driver {
         ))
     }
 
-    pub(crate) fn is_enabled(&self) -> bool {
-        self.inner.is_enabled()
-    }
-
     pub(crate) fn park(&mut self, handle: &Handle) {
-        self.inner.park(handle)
+        self.inner.park(handle);
     }
 
     pub(crate) fn park_timeout(&mut self, handle: &Handle, duration: Duration) {
-        self.inner.park_timeout(handle, duration)
+        self.inner.park_timeout(handle, duration);
     }
 
     pub(crate) fn shutdown(&mut self, handle: &Handle) {
-        self.inner.shutdown(handle)
+        self.inner.shutdown(handle);
     }
 }
 
@@ -161,13 +157,6 @@ cfg_io_driver! {
     }
 
     impl IoStack {
-        pub(crate) fn is_enabled(&self) -> bool {
-            match self {
-                IoStack::Enabled(..) => true,
-                IoStack::Disabled(..) => false,
-            }
-        }
-
         pub(crate) fn park(&mut self, handle: &Handle) {
             match self {
                 IoStack::Enabled(v) => v.park(handle),
@@ -317,13 +306,6 @@ cfg_time! {
     }
 
     impl TimeDriver {
-        pub(crate) fn is_enabled(&self) -> bool {
-            match self {
-                TimeDriver::Enabled { .. } => true,
-                TimeDriver::Disabled(inner) => inner.is_enabled(),
-            }
-        }
-
         pub(crate) fn park(&mut self, handle: &Handle) {
             match self {
                 TimeDriver::Enabled { driver, .. } => driver.park(handle),
@@ -364,4 +346,8 @@ cfg_not_time! {
     ) -> (TimeDriver, TimeHandle) {
         (io_stack, ())
     }
+}
+
+cfg_tokio_uring! {
+    pub(crate) mod op;
 }

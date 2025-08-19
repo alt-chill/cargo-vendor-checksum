@@ -112,6 +112,52 @@
 //! [thread_join]: std::thread::JoinHandle
 //! [`JoinError`]: crate::task::JoinError
 //!
+//! #### Cancellation
+//!
+//! Spawned tasks may be cancelled using the [`JoinHandle::abort`] or
+//! [`AbortHandle::abort`] methods. When one of these methods are called, the
+//! task is signalled to shut down next time it yields at an `.await` point. If
+//! the task is already idle, then it will be shut down as soon as possible
+//! without running again before being shut down. Additionally, shutting down a
+//! Tokio runtime (e.g. by returning from `#[tokio::main]`) immediately cancels
+//! all tasks on it.
+//!
+//! When tasks are shut down, it will stop running at whichever `.await` it has
+//! yielded at. All local variables are destroyed by running their destructor.
+//! Once shutdown has completed, awaiting the [`JoinHandle`] will fail with a
+//! [cancelled error](crate::task::JoinError::is_cancelled).
+//!
+//! Note that aborting a task does not guarantee that it fails with a cancelled
+//! error, since it may complete normally first. For example, if the task does
+//! not yield to the runtime at any point between the call to `abort` and the
+//! end of the task, then the [`JoinHandle`] will instead report that the task
+//! exited normally.
+//!
+//! Be aware that tasks spawned using [`spawn_blocking`] cannot be aborted
+//! because they are not async. If you call `abort` on a `spawn_blocking`
+//! task, then this *will not have any effect*, and the task will continue
+//! running normally. The exception is if the task has not started running
+//! yet; in that case, calling `abort` may prevent the task from starting.
+//!
+//! Be aware that calls to [`JoinHandle::abort`] just schedule the task for
+//! cancellation, and will return before the cancellation has completed. To wait
+//! for cancellation to complete, wait for the task to finish by awaiting the
+//! [`JoinHandle`]. Similarly, the [`JoinHandle::is_finished`] method does not
+//! return `true` until the cancellation has finished.
+//!
+//! Calling [`JoinHandle::abort`] multiple times has the same effect as calling
+//! it once.
+//!
+//! Tokio also provides an [`AbortHandle`], which is like the [`JoinHandle`],
+//! except that it does not provide a mechanism to wait for the task to finish.
+//! Each task can only have one [`JoinHandle`], but it can have more than one
+//! [`AbortHandle`].
+//!
+//! [`JoinHandle::abort`]: crate::task::JoinHandle::abort
+//! [`AbortHandle::abort`]: crate::task::AbortHandle::abort
+//! [`AbortHandle`]: crate::task::AbortHandle
+//! [`JoinHandle::is_finished`]: crate::task::JoinHandle::is_finished
+//!
 //! ### Blocking and Yielding
 //!
 //! As we discussed above, code running in asynchronous tasks should not perform
@@ -127,7 +173,7 @@
 //! blocking operations there. This includes destructors of objects destroyed in
 //! async code.
 //!
-//! #### spawn_blocking
+//! #### `spawn_blocking`
 //!
 //! The `task::spawn_blocking` function is similar to the `task::spawn` function
 //! discussed in the previous section, but rather than spawning an
@@ -162,7 +208,7 @@
 //! # }
 //! ```
 //!
-//! #### block_in_place
+//! #### `block_in_place`
 //!
 //! When using the [multi-threaded runtime][rt-multi-thread], the [`task::block_in_place`]
 //! function is also available. Like `task::spawn_blocking`, this function
@@ -187,7 +233,7 @@
 //! # }
 //! ```
 //!
-//! #### yield_now
+//! #### `yield_now`
 //!
 //! In addition, this module provides a [`task::yield_now`] async function
 //! that is analogous to the standard library's [`thread::yield_now`]. Calling
@@ -214,74 +260,17 @@
 //! # }
 //! ```
 //!
-//! ### Cooperative scheduling
-//!
-//! A single call to [`poll`] on a top-level task may potentially do a lot of
-//! work before it returns `Poll::Pending`. If a task runs for a long period of
-//! time without yielding back to the executor, it can starve other tasks
-//! waiting on that executor to execute them, or drive underlying resources.
-//! Since Rust does not have a runtime, it is difficult to forcibly preempt a
-//! long-running task. Instead, this module provides an opt-in mechanism for
-//! futures to collaborate with the executor to avoid starvation.
-//!
-//! Consider a future like this one:
-//!
-//! ```
-//! # use tokio_stream::{Stream, StreamExt};
-//! async fn drop_all<I: Stream + Unpin>(mut input: I) {
-//!     while let Some(_) = input.next().await {}
-//! }
-//! ```
-//!
-//! It may look harmless, but consider what happens under heavy load if the
-//! input stream is _always_ ready. If we spawn `drop_all`, the task will never
-//! yield, and will starve other tasks and resources on the same executor.
-//!
-//! To account for this, Tokio has explicit yield points in a number of library
-//! functions, which force tasks to return to the executor periodically.
-//!
-//!
-//! #### unconstrained
-//!
-//! If necessary, [`task::unconstrained`] lets you opt a future out of of Tokio's cooperative
-//! scheduling. When a future is wrapped with `unconstrained`, it will never be forced to yield to
-//! Tokio. For example:
-//!
-//! ```
-//! # #[tokio::main]
-//! # async fn main() {
-//! use tokio::{task, sync::mpsc};
-//!
-//! let fut = async {
-//!     let (tx, mut rx) = mpsc::unbounded_channel();
-//!
-//!     for i in 0..1000 {
-//!         let _ = tx.send(());
-//!         // This will always be ready. If coop was in effect, this code would be forced to yield
-//!         // periodically. However, if left unconstrained, then this code will never yield.
-//!         rx.recv().await;
-//!     }
-//! };
-//!
-//! task::unconstrained(fut).await;
-//! # }
-//! ```
-//!
 //! [`task::spawn_blocking`]: crate::task::spawn_blocking
 //! [`task::block_in_place`]: crate::task::block_in_place
 //! [rt-multi-thread]: ../runtime/index.html#threaded-scheduler
 //! [`task::yield_now`]: crate::task::yield_now()
 //! [`thread::yield_now`]: std::thread::yield_now
-//! [`task::unconstrained`]: crate::task::unconstrained()
-//! [`poll`]: method@std::future::Future::poll
 
 cfg_rt! {
     pub use crate::runtime::task::{JoinError, JoinHandle};
 
-    cfg_not_wasi! {
-        mod blocking;
-        pub use blocking::spawn_blocking;
-    }
+    mod blocking;
+    pub use blocking::spawn_blocking;
 
     mod spawn;
     pub use spawn::spawn;
@@ -293,19 +282,22 @@ cfg_rt! {
     mod yield_now;
     pub use yield_now::yield_now;
 
-    cfg_unstable! {
-        mod consume_budget;
-        pub use consume_budget::consume_budget;
-    }
+    pub mod coop;
+    #[doc(hidden)]
+    #[deprecated = "Moved to tokio::task::coop::consume_budget"]
+    pub use coop::consume_budget;
+    #[doc(hidden)]
+    #[deprecated = "Moved to tokio::task::coop::unconstrained"]
+    pub use coop::unconstrained;
+    #[doc(hidden)]
+    #[deprecated = "Moved to tokio::task::coop::Unconstrained"]
+    pub use coop::Unconstrained;
 
     mod local;
     pub use local::{spawn_local, LocalSet, LocalEnterGuard};
 
     mod task_local;
     pub use task_local::LocalKey;
-
-    mod unconstrained;
-    pub use unconstrained::{unconstrained, Unconstrained};
 
     #[doc(inline)]
     pub use join_set::JoinSet;
@@ -317,9 +309,7 @@ cfg_rt! {
     #[cfg(tokio_unstable)]
     pub mod join_set;
 
-    cfg_unstable! {
-        pub use crate::runtime::task::{Id, id, try_id};
-    }
+    pub use crate::runtime::task::{Id, id, try_id};
 
     cfg_trace! {
         mod builder;
@@ -330,4 +320,8 @@ cfg_rt! {
     pub mod futures {
         pub use super::task_local::TaskLocalFuture;
     }
+}
+
+cfg_not_rt! {
+    pub(crate) mod coop;
 }

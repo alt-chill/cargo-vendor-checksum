@@ -99,7 +99,7 @@ impl Driver {
     }
 
     pub(crate) fn shutdown(&mut self, handle: &driver::Handle) {
-        self.io.shutdown(handle)
+        self.io.shutdown(handle);
     }
 
     fn process(&mut self) {
@@ -112,12 +112,13 @@ impl Driver {
         // Drain the pipe completely so we can receive a new readiness event
         // if another signal has come in.
         let mut buf = [0; 128];
+        #[allow(clippy::unused_io_amount)]
         loop {
             match self.receiver.read(&mut buf) {
                 Ok(0) => panic!("EOF on self-pipe"),
                 Ok(_) => continue, // Keep reading
                 Err(e) if e.kind() == std_io::ErrorKind::WouldBlock => break,
-                Err(e) => panic!("Bad read on self-pipe: {}", e),
+                Err(e) => panic!("Bad read on self-pipe: {e}"),
             }
         }
 

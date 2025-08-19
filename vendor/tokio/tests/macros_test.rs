@@ -25,10 +25,16 @@ async fn unused_braces_test() { assert_eq!(1 + 1, 2) }
 fn trait_method() {
     trait A {
         fn f(self);
+
+        fn g(self);
     }
     impl A for () {
         #[tokio::main]
-        async fn f(self) {}
+        async fn f(self) {
+            self.g()
+        }
+
+        fn g(self) {}
     }
     ().f()
 }
@@ -85,4 +91,27 @@ pub mod issue_5243 {
     mac!(
         async fn foo() {}
     );
+}
+
+#[cfg(tokio_unstable)]
+pub mod macro_rt_arg_unhandled_panic {
+    use tokio_test::assert_err;
+
+    #[tokio::test(flavor = "current_thread", unhandled_panic = "shutdown_runtime")]
+    #[should_panic]
+    async fn unhandled_panic_shutdown_runtime() {
+        let _ = tokio::spawn(async {
+            panic!("This panic should shutdown the runtime.");
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread", unhandled_panic = "ignore")]
+    async fn unhandled_panic_ignore() {
+        let rt = tokio::spawn(async {
+            panic!("This panic should be forwarded to rt as an error.");
+        })
+        .await;
+        assert_err!(rt);
+    }
 }

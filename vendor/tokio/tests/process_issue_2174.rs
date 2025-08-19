@@ -7,7 +7,7 @@
 // It is expected that `EVFILT_WRITE` would be returned with either the
 // `EV_EOF` or `EV_ERROR` flag set. If either flag is set a write would be
 // attempted, but that does not seem to occur.
-#![cfg(all(unix, not(target_os = "freebsd")))]
+#![cfg(all(unix, not(target_os = "freebsd"), not(miri)))]
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -17,6 +17,7 @@ use tokio::time;
 use tokio_test::assert_err;
 
 #[tokio::test]
+#[cfg_attr(panic = "abort", ignore)]
 async fn issue_2174() {
     let mut child = Command::new("sleep")
         .arg("2")

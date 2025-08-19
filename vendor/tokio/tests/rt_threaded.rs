@@ -1,5 +1,6 @@
 #![warn(rust_2018_idioms)]
-#![cfg(all(feature = "full", not(target_os = "wasi")))]
+// Too slow on miri.
+#![cfg(all(feature = "full", not(target_os = "wasi"), not(miri)))]
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -7,17 +8,16 @@ use tokio::runtime;
 use tokio::sync::oneshot;
 use tokio_test::{assert_err, assert_ok};
 
-use futures::future::poll_fn;
-use std::future::Future;
+use std::future::{poll_fn, Future};
 use std::pin::Pin;
-use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
 macro_rules! cfg_metrics {
     ($($t:tt)*) => {
-        #[cfg(tokio_unstable)]
+        #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
         {
             $( $t )*
         }
@@ -188,6 +188,7 @@ fn lifo_slot_budget() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // No `socket` in miri.
 fn spawn_shutdown() {
     let rt = rt();
     let (tx, rx) = mpsc::channel();
@@ -321,6 +322,8 @@ fn start_stop_callbacks_called() {
 }
 
 #[test]
+// too slow on miri
+#[cfg_attr(miri, ignore)]
 fn blocking() {
     // used for notifying the main thread
     const NUM: usize = 1_000;
@@ -486,6 +489,34 @@ fn max_blocking_threads_set_to_zero() {
         .unwrap();
 }
 
+/// Regression test for #6445.
+///
+/// After #6445, setting `global_queue_interval` to 1 is now technically valid.
+/// This test confirms that there is no regression in `multi_thread_runtime`
+/// when global_queue_interval is set to 1.
+#[test]
+fn global_queue_interval_set_to_one() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .global_queue_interval(1)
+        .build()
+        .unwrap();
+
+    // Perform a simple work.
+    let cnt = Arc::new(AtomicUsize::new(0));
+    rt.block_on(async {
+        let mut set = tokio::task::JoinSet::new();
+        for _ in 0..10 {
+            let cnt = cnt.clone();
+            set.spawn(async move { cnt.fetch_add(1, Ordering::Relaxed) });
+        }
+
+        while let Some(res) = set.join_next().await {
+            res.unwrap();
+        }
+    });
+    assert_eq!(cnt.load(Relaxed), 10);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hang_on_shutdown() {
     let (sync_tx, sync_rx) = std::sync::mpsc::channel::<()>();
@@ -614,6 +645,51 @@ fn test_nested_block_in_place_with_block_on_between() {
             .unwrap()
         });
     }
+}
+
+#[test]
+fn yield_now_in_block_in_place() {
+    let rt = runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .build()
+        .unwrap();
+
+    rt.block_on(async {
+        tokio::spawn(async {
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(tokio::task::yield_now());
+            })
+        })
+        .await
+        .unwrap()
+    })
+}
+
+#[test]
+fn mutex_in_block_in_place() {
+    const BUDGET: usize = 128;
+
+    let rt = runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .build()
+        .unwrap();
+
+    rt.block_on(async {
+        let lock = tokio::sync::Mutex::new(0);
+
+        tokio::spawn(async move {
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async move {
+                    for i in 0..(BUDGET + 1) {
+                        let mut guard = lock.lock().await;
+                        *guard = i;
+                    }
+                });
+            })
+        })
+        .await
+        .unwrap();
+    })
 }
 
 // Testing the tuning logic is tricky as it is inherently timing based, and more

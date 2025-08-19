@@ -82,6 +82,7 @@
 //! [`steal_batch()`]: Stealer::steal_batch
 //! [`steal_batch_and_pop()`]: Stealer::steal_batch_and_pop
 
+#![no_std]
 #![doc(test(
     no_crate_inject,
     attr(
@@ -95,16 +96,11 @@
     rust_2018_idioms,
     unreachable_pub
 )]
-#![cfg_attr(not(feature = "std"), no_std)]
 
-use cfg_if::cfg_if;
+#[cfg(feature = "std")]
+extern crate std;
 
-cfg_if! {
-    if #[cfg(feature = "std")] {
-        use crossbeam_epoch as epoch;
-        use crossbeam_utils as utils;
-
-        mod deque;
-        pub use crate::deque::{Injector, Steal, Stealer, Worker};
-    }
-}
+#[cfg(feature = "std")]
+mod deque;
+#[cfg(feature = "std")]
+pub use crate::deque::{Injector, Steal, Stealer, Worker};

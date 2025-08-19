@@ -710,8 +710,12 @@ pub const SHT_PREINIT_ARRAY: u32 = 16;
 pub const SHT_GROUP: u32 = 17;
 /// Extended section indices for a symbol table.
 pub const SHT_SYMTAB_SHNDX: u32 = 18;
+/// Relocation entries; only offsets.
+pub const SHT_RELR: u32 = 19;
 /// Start of OS-specific section types.
 pub const SHT_LOOS: u32 = 0x6000_0000;
+/// LLVM-style dependent libraries.
+pub const SHT_LLVM_DEPENDENT_LIBRARIES: u32 = 0x6fff4c04;
 /// Object attributes.
 pub const SHT_GNU_ATTRIBUTES: u32 = 0x6fff_fff5;
 /// GNU-style hash table.
@@ -776,6 +780,10 @@ pub const SHF_TLS: u32 = 1 << 10;
 pub const SHF_COMPRESSED: u32 = 1 << 11;
 /// OS-specific section flags.
 pub const SHF_MASKOS: u32 = 0x0ff0_0000;
+/// Section should not be garbage collected by the linker.
+pub const SHF_GNU_RETAIN: u32 = 1 << 21;
+/// Mbind section.
+pub const SHF_GNU_MBIND: u32 = 1 << 24;
 /// Processor-specific section flags.
 pub const SHF_MASKPROC: u32 = 0xf000_0000;
 /// This section is excluded from the final executable or shared library.
@@ -1210,6 +1218,16 @@ impl<E: Endian> Rela64<E> {
         self.r_info = Self::r_info(endian, is_mips64el, r_sym, r_type);
     }
 }
+
+/// 32-bit relative relocation table entry.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct Relr32<E: Endian>(pub U32<E>);
+
+/// 64-bit relative relocation table entry.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct Relr64<E: Endian>(pub U64<E>);
 
 /// Program segment header.
 #[derive(Debug, Clone, Copy)]
@@ -1864,6 +1882,7 @@ pub const ELF_NOTE_OS_FREEBSD: u32 = 3;
 /// The descriptor begins with two words:
 /// - word 0: number of entries
 /// - word 1: bitmask of enabled entries
+///
 /// Then follow variable-length entries, one byte followed by a
 /// '\0'-terminated hwcap name string.  The byte gives the bit
 /// number to test if enabled, (1U << bit) & bitmask.  */
@@ -2206,6 +2225,114 @@ pub const R_386_TLS_DESC: u32 = 41;
 pub const R_386_IRELATIVE: u32 = 42;
 /// Load from 32 bit GOT entry, relaxable.
 pub const R_386_GOT32X: u32 = 43;
+
+// ADI SHARC specific definitions
+
+// SHARC values for `Rel*::r_type`
+
+/// 24-bit absolute address in bits 23:0 of a 48-bit instr
+///
+/// Targets:
+///
+/// * Type 25a (PC_DIRECT)
+pub const R_SHARC_ADDR24_V3: u32 = 0x0b;
+
+/// 32-bit absolute address in bits 31:0 of a 48-bit instr
+///
+/// Targets:
+///
+/// * Type 14a
+/// * Type 14d
+/// * Type 15a
+/// * Type 16a
+/// * Type 17a
+/// * Type 18a
+/// * Type 19a
+pub const R_SHARC_ADDR32_V3: u32 = 0x0c;
+
+/// 32-bit absolute address in bits 31:0 of a 32-bit data location
+///
+/// Represented with `RelocationEncoding::Generic`
+pub const R_SHARC_ADDR_VAR_V3: u32 = 0x0d;
+
+/// 6-bit PC-relative address in bits 32:27 of a 48-bit instr
+///
+/// Targets:
+///
+/// * Type 9a
+/// * Type 10a
+pub const R_SHARC_PCRSHORT_V3: u32 = 0x0e;
+
+/// 24-bit PC-relative address in bits 23:0 of a 48-bit instr
+///
+/// Targets:
+///
+/// * Type 8a
+/// * Type 12a (truncated to 23 bits after relocation)
+/// * Type 13a (truncated to 23 bits after relocation)
+/// * Type 25a (PC Relative)
+pub const R_SHARC_PCRLONG_V3: u32 = 0x0f;
+
+/// 6-bit absolute address in bits 32:27 of a 48-bit instr
+///
+/// Targets:
+///
+/// * Type 4a
+/// * Type 4b
+/// * Type 4d
+pub const R_SHARC_DATA6_V3: u32 = 0x10;
+
+/// 16-bit absolute address in bits 39:24 of a 48-bit instr
+///
+/// Targets:
+///
+/// * Type 12a
+pub const R_SHARC_DATA16_V3: u32 = 0x11;
+
+/// 6-bit absolute address into bits 16:11 of a 32-bit instr
+///
+/// Targets:
+///
+/// * Type 4b
+pub const R_SHARC_DATA6_VISA_V3: u32 = 0x12;
+
+/// 7-bit absolute address into bits 6:0 of a 32-bit instr
+pub const R_SHARC_DATA7_VISA_V3: u32 = 0x13;
+
+/// 16-bit absolute address into bits 15:0 of a 32-bit instr
+pub const R_SHARC_DATA16_VISA_V3: u32 = 0x14;
+
+/// 6-bit PC-relative address into bits 16:11 of a Type B
+///
+/// Targets:
+///
+/// * Type 9b
+pub const R_SHARC_PCR6_VISA_V3: u32 = 0x17;
+
+/// 16-bit absolute address into bits 15:0 of a 16-bit location.
+///
+/// Represented with `RelocationEncoding::Generic`
+pub const R_SHARC_ADDR_VAR16_V3: u32 = 0x19;
+
+pub const R_SHARC_CALC_PUSH_ADDR: u32 = 0xe0;
+pub const R_SHARC_CALC_PUSH_ADDEND: u32 = 0xe1;
+pub const R_SHARC_CALC_ADD: u32 = 0xe2;
+pub const R_SHARC_CALC_SUB: u32 = 0xe3;
+pub const R_SHARC_CALC_MUL: u32 = 0xe4;
+pub const R_SHARC_CALC_DIV: u32 = 0xe5;
+pub const R_SHARC_CALC_MOD: u32 = 0xe6;
+pub const R_SHARC_CALC_LSHIFT: u32 = 0xe7;
+pub const R_SHARC_CALC_RSHIFT: u32 = 0xe8;
+pub const R_SHARC_CALC_AND: u32 = 0xe9;
+pub const R_SHARC_CALC_OR: u32 = 0xea;
+pub const R_SHARC_CALC_XOR: u32 = 0xeb;
+pub const R_SHARC_CALC_PUSH_LEN: u32 = 0xec;
+pub const R_SHARC_CALC_NOT: u32 = 0xf6;
+
+// SHARC values for `SectionHeader*::sh_type`.
+
+/// .adi.attributes
+pub const SHT_SHARC_ADI_ATTRIBUTES: u32 = SHT_LOPROC + 0x2;
 
 // SUN SPARC specific definitions.
 
@@ -3718,6 +3845,10 @@ pub const SHT_ARM_PREEMPTMAP: u32 = SHT_LOPROC + 2;
 /// ARM attributes section.
 pub const SHT_ARM_ATTRIBUTES: u32 = SHT_LOPROC + 3;
 
+// AArch64 values for `SectionHeader*::sh_type`.
+/// AArch64 attributes section.
+pub const SHT_AARCH64_ATTRIBUTES: u32 = SHT_LOPROC + 3;
+
 // AArch64 values for `Rel*::r_type`.
 
 /// No relocation.
@@ -4088,14 +4219,14 @@ pub const R_ARM_PC13: u32 = 4;
 pub const R_ARM_ABS16: u32 = 5;
 /// Direct 12 bit
 pub const R_ARM_ABS12: u32 = 6;
-/// Direct & 0x7C (LDR, STR).
+/// Direct & 0x7C (`LDR`, `STR`).
 pub const R_ARM_THM_ABS5: u32 = 7;
 /// Direct 8 bit
 pub const R_ARM_ABS8: u32 = 8;
 pub const R_ARM_SBREL32: u32 = 9;
-/// PC relative 24 bit (Thumb32 BL).
+/// PC relative 24 bit (Thumb32 `BL`).
 pub const R_ARM_THM_PC22: u32 = 10;
-/// PC relative & 0x3FC (Thumb16 LDR, ADD, ADR).
+/// PC relative & 0x3FC (Thumb16 `LDR`, `ADD`, `ADR`).
 pub const R_ARM_THM_PC8: u32 = 11;
 pub const R_ARM_AMP_VCALL9: u32 = 12;
 /// Obsolete static relocation.
@@ -4130,11 +4261,11 @@ pub const R_ARM_GOTPC: u32 = 25;
 pub const R_ARM_GOT32: u32 = 26;
 /// Deprecated, 32 bit PLT address.
 pub const R_ARM_PLT32: u32 = 27;
-/// PC relative 24 bit (BL, BLX).
+/// PC relative 24 bit (`BL`, `BLX`).
 pub const R_ARM_CALL: u32 = 28;
-/// PC relative 24 bit (B, BL<cond>).
+/// PC relative 24 bit (`B`, `BL<cond>`).
 pub const R_ARM_JUMP24: u32 = 29;
-/// PC relative 24 bit (Thumb32 B.W).
+/// PC relative 24 bit (Thumb32 `B.W`).
 pub const R_ARM_THM_JUMP24: u32 = 30;
 /// Adjust by program base.
 pub const R_ARM_BASE_ABS: u32 = 31;
@@ -4157,99 +4288,99 @@ pub const R_ARM_V4BX: u32 = 40;
 pub const R_ARM_TARGET2: u32 = 41;
 /// 32 bit PC relative.
 pub const R_ARM_PREL31: u32 = 42;
-/// Direct 16-bit (MOVW).
+/// Direct 16-bit (`MOVW`).
 pub const R_ARM_MOVW_ABS_NC: u32 = 43;
-/// Direct high 16-bit (MOVT).
+/// Direct high 16-bit (`MOVT`).
 pub const R_ARM_MOVT_ABS: u32 = 44;
-/// PC relative 16-bit (MOVW).
+/// PC relative 16-bit (`MOVW`).
 pub const R_ARM_MOVW_PREL_NC: u32 = 45;
 /// PC relative (MOVT).
 pub const R_ARM_MOVT_PREL: u32 = 46;
-/// Direct 16 bit (Thumb32 MOVW).
+/// Direct 16 bit (Thumb32 `MOVW`).
 pub const R_ARM_THM_MOVW_ABS_NC: u32 = 47;
-/// Direct high 16 bit (Thumb32 MOVT).
+/// Direct high 16 bit (Thumb32 `MOVT`).
 pub const R_ARM_THM_MOVT_ABS: u32 = 48;
-/// PC relative 16 bit (Thumb32 MOVW).
+/// PC relative 16 bit (Thumb32 `MOVW`).
 pub const R_ARM_THM_MOVW_PREL_NC: u32 = 49;
-/// PC relative high 16 bit (Thumb32 MOVT).
+/// PC relative high 16 bit (Thumb32 `MOVT`).
 pub const R_ARM_THM_MOVT_PREL: u32 = 50;
-/// PC relative 20 bit (Thumb32 B<cond>.W).
+/// PC relative 20 bit (Thumb32 `B<cond>.W`).
 pub const R_ARM_THM_JUMP19: u32 = 51;
-/// PC relative X & 0x7E (Thumb16 CBZ, CBNZ).
+/// PC relative X & 0x7E (Thumb16 `CBZ`, `CBNZ`).
 pub const R_ARM_THM_JUMP6: u32 = 52;
-/// PC relative 12 bit (Thumb32 ADR.W).
+/// PC relative 12 bit (Thumb32 `ADR.W`).
 pub const R_ARM_THM_ALU_PREL_11_0: u32 = 53;
-/// PC relative 12 bit (Thumb32 LDR{D,SB,H,SH}).
+/// PC relative 12 bit (Thumb32 `LDR{D,SB,H,SH}`).
 pub const R_ARM_THM_PC12: u32 = 54;
 /// Direct 32-bit.
 pub const R_ARM_ABS32_NOI: u32 = 55;
 /// PC relative 32-bit.
 pub const R_ARM_REL32_NOI: u32 = 56;
-/// PC relative (ADD, SUB).
+/// PC relative (`ADD`, `SUB`).
 pub const R_ARM_ALU_PC_G0_NC: u32 = 57;
-/// PC relative (ADD, SUB).
+/// PC relative (`ADD`, `SUB`).
 pub const R_ARM_ALU_PC_G0: u32 = 58;
-/// PC relative (ADD, SUB).
+/// PC relative (`ADD`, `SUB`).
 pub const R_ARM_ALU_PC_G1_NC: u32 = 59;
-/// PC relative (ADD, SUB).
+/// PC relative (`ADD`, `SUB`).
 pub const R_ARM_ALU_PC_G1: u32 = 60;
-/// PC relative (ADD, SUB).
+/// PC relative (`ADD`, `SUB`).
 pub const R_ARM_ALU_PC_G2: u32 = 61;
-/// PC relative (LDR,STR,LDRB,STRB).
+/// PC relative (`LDR`,`STR`,`LDRB`,`STRB`).
 pub const R_ARM_LDR_PC_G1: u32 = 62;
-/// PC relative (LDR,STR,LDRB,STRB).
+/// PC relative (`LDR`,`STR`,`LDRB`,`STRB`).
 pub const R_ARM_LDR_PC_G2: u32 = 63;
-/// PC relative (STR{D,H}, LDR{D,SB,H,SH}).
+/// PC relative (`STR{D,H}`, `LDR{D,SB,H,SH}`).
 pub const R_ARM_LDRS_PC_G0: u32 = 64;
-/// PC relative (STR{D,H}, LDR{D,SB,H,SH}).
+/// PC relative (`STR{D,H}`, `LDR{D,SB,H,SH}`).
 pub const R_ARM_LDRS_PC_G1: u32 = 65;
-/// PC relative (STR{D,H}, LDR{D,SB,H,SH}).
+/// PC relative (`STR{D,H}`, `LDR{D,SB,H,SH}`).
 pub const R_ARM_LDRS_PC_G2: u32 = 66;
-/// PC relative (LDC, STC).
+/// PC relative (`LDC`, `STC`).
 pub const R_ARM_LDC_PC_G0: u32 = 67;
-/// PC relative (LDC, STC).
+/// PC relative (`LDC`, `STC`).
 pub const R_ARM_LDC_PC_G1: u32 = 68;
-/// PC relative (LDC, STC).
+/// PC relative (`LDC`, `STC`).
 pub const R_ARM_LDC_PC_G2: u32 = 69;
-/// Program base relative (ADD,SUB).
+/// Program base relative (`ADD`,`SUB`).
 pub const R_ARM_ALU_SB_G0_NC: u32 = 70;
-/// Program base relative (ADD,SUB).
+/// Program base relative (`ADD`,`SUB`).
 pub const R_ARM_ALU_SB_G0: u32 = 71;
-/// Program base relative (ADD,SUB).
+/// Program base relative (`ADD`,`SUB`).
 pub const R_ARM_ALU_SB_G1_NC: u32 = 72;
-/// Program base relative (ADD,SUB).
+/// Program base relative (`ADD`,`SUB`).
 pub const R_ARM_ALU_SB_G1: u32 = 73;
-/// Program base relative (ADD,SUB).
+/// Program base relative (`ADD`,`SUB`).
 pub const R_ARM_ALU_SB_G2: u32 = 74;
-/// Program base relative (LDR, STR, LDRB, STRB).
+/// Program base relative (`LDR`, `STR`, `LDRB`, `STRB`).
 pub const R_ARM_LDR_SB_G0: u32 = 75;
-/// Program base relative (LDR, STR, LDRB, STRB).
+/// Program base relative (`LDR`, `STR`, `LDRB`, `STRB`).
 pub const R_ARM_LDR_SB_G1: u32 = 76;
-/// Program base relative (LDR, STR, LDRB, STRB).
+/// Program base relative (`LDR`, `STR`, `LDRB`, `STRB`).
 pub const R_ARM_LDR_SB_G2: u32 = 77;
-/// Program base relative (LDR, STR, LDRB, STRB).
+/// Program base relative (`LDR`, `STR`, `LDRB`, `STRB`).
 pub const R_ARM_LDRS_SB_G0: u32 = 78;
-/// Program base relative (LDR, STR, LDRB, STRB).
+/// Program base relative (`LDR`, `STR`, `LDRB`, `STRB`).
 pub const R_ARM_LDRS_SB_G1: u32 = 79;
-/// Program base relative (LDR, STR, LDRB, STRB).
+/// Program base relative (`LDR`, `STR`, `LDRB`, `STRB`).
 pub const R_ARM_LDRS_SB_G2: u32 = 80;
-/// Program base relative (LDC,STC).
+/// Program base relative (`LDC`,`STC`).
 pub const R_ARM_LDC_SB_G0: u32 = 81;
-/// Program base relative (LDC,STC).
+/// Program base relative (`LDC`,`STC`).
 pub const R_ARM_LDC_SB_G1: u32 = 82;
-/// Program base relative (LDC,STC).
+/// Program base relative (`LDC`,`STC`).
 pub const R_ARM_LDC_SB_G2: u32 = 83;
-/// Program base relative 16 bit (MOVW).
+/// Program base relative 16 bit (`MOVW`).
 pub const R_ARM_MOVW_BREL_NC: u32 = 84;
-/// Program base relative high 16 bit (MOVT).
+/// Program base relative high 16 bit (`MOVT`).
 pub const R_ARM_MOVT_BREL: u32 = 85;
-/// Program base relative 16 bit (MOVW).
+/// Program base relative 16 bit (`MOVW`).
 pub const R_ARM_MOVW_BREL: u32 = 86;
-/// Program base relative 16 bit (Thumb32 MOVW).
+/// Program base relative 16 bit (Thumb32 `MOVW`).
 pub const R_ARM_THM_MOVW_BREL_NC: u32 = 87;
-/// Program base relative high 16 bit (Thumb32 MOVT).
+/// Program base relative high 16 bit (Thumb32 `MOVT`).
 pub const R_ARM_THM_MOVT_BREL: u32 = 88;
-/// Program base relative 16 bit (Thumb32 MOVW).
+/// Program base relative 16 bit (Thumb32 `MOVW`).
 pub const R_ARM_THM_MOVW_BREL: u32 = 89;
 pub const R_ARM_TLS_GOTDESC: u32 = 90;
 pub const R_ARM_TLS_CALL: u32 = 91;
@@ -4261,16 +4392,16 @@ pub const R_ARM_PLT32_ABS: u32 = 94;
 pub const R_ARM_GOT_ABS: u32 = 95;
 /// PC relative GOT entry.
 pub const R_ARM_GOT_PREL: u32 = 96;
-/// GOT entry relative to GOT origin (LDR).
+/// GOT entry relative to GOT origin (`LDR`).
 pub const R_ARM_GOT_BREL12: u32 = 97;
-/// 12 bit, GOT entry relative to GOT origin (LDR, STR).
+/// 12 bit, GOT entry relative to GOT origin (`LDR`, `STR`).
 pub const R_ARM_GOTOFF12: u32 = 98;
 pub const R_ARM_GOTRELAX: u32 = 99;
 pub const R_ARM_GNU_VTENTRY: u32 = 100;
 pub const R_ARM_GNU_VTINHERIT: u32 = 101;
-/// PC relative & 0xFFE (Thumb16 B).
+/// PC relative & 0xFFE (Thumb16 `B`).
 pub const R_ARM_THM_PC11: u32 = 102;
-/// PC relative & 0x1FE (Thumb16 B/B<cond>).
+/// PC relative & 0x1FE (Thumb16 `B`/`B<cond>`).
 pub const R_ARM_THM_PC9: u32 = 103;
 /// PC-rel 32 bit for global dynamic thread local data
 pub const R_ARM_TLS_GD32: u32 = 104;
@@ -4282,18 +4413,18 @@ pub const R_ARM_TLS_LDO32: u32 = 106;
 pub const R_ARM_TLS_IE32: u32 = 107;
 /// 32 bit offset relative to static TLS block
 pub const R_ARM_TLS_LE32: u32 = 108;
-/// 12 bit relative to TLS block (LDR, STR).
+/// 12 bit relative to TLS block (`LDR`, `STR`).
 pub const R_ARM_TLS_LDO12: u32 = 109;
-/// 12 bit relative to static TLS block (LDR, STR).
+/// 12 bit relative to static TLS block (`LDR`, `STR`).
 pub const R_ARM_TLS_LE12: u32 = 110;
-/// 12 bit GOT entry relative to GOT origin (LDR).
+/// 12 bit GOT entry relative to GOT origin (`LDR`).
 pub const R_ARM_TLS_IE12GP: u32 = 111;
 /// Obsolete.
 pub const R_ARM_ME_TOO: u32 = 128;
 pub const R_ARM_THM_TLS_DESCSEQ: u32 = 129;
 pub const R_ARM_THM_TLS_DESCSEQ16: u32 = 129;
 pub const R_ARM_THM_TLS_DESCSEQ32: u32 = 130;
-/// GOT entry relative to GOT origin, 12 bit (Thumb32 LDR).
+/// GOT entry relative to GOT origin, 12 bit (Thumb32 `LDR`).
 pub const R_ARM_THM_GOT_BREL12: u32 = 131;
 pub const R_ARM_IRELATIVE: u32 = 160;
 pub const R_ARM_RXPC25: u32 = 249;
@@ -5695,6 +5826,10 @@ pub const EF_RISCV_FLOAT_ABI_QUAD: u32 = 0x0006;
 pub const EF_RISCV_RVE: u32 = 0x0008;
 pub const EF_RISCV_TSO: u32 = 0x0010;
 
+// RISC-V values for `SectionHeader*::sh_type`.
+/// RISC-V attributes section.
+pub const SHT_RISCV_ATTRIBUTES: u32 = SHT_LOPROC + 3;
+
 // RISC-V values `Rel*::r_type`.
 pub const R_RISCV_NONE: u32 = 0;
 pub const R_RISCV_32: u32 = 1;
@@ -5750,6 +5885,14 @@ pub const R_RISCV_SET8: u32 = 54;
 pub const R_RISCV_SET16: u32 = 55;
 pub const R_RISCV_SET32: u32 = 56;
 pub const R_RISCV_32_PCREL: u32 = 57;
+pub const R_RISCV_IRELATIVE: u32 = 58;
+pub const R_RISCV_PLT32: u32 = 59;
+pub const R_RISCV_SET_ULEB128: u32 = 60;
+pub const R_RISCV_SUB_ULEB128: u32 = 61;
+pub const R_RISCV_TLSDESC_HI20: u32 = 62;
+pub const R_RISCV_TLSDESC_LOAD_LO12: u32 = 63;
+pub const R_RISCV_TLSDESC_ADD_LO12: u32 = 64;
+pub const R_RISCV_TLSDESC_CALL: u32 = 65;
 
 // BPF values `Rel*::r_type`.
 /// No reloc
@@ -6053,8 +6196,30 @@ pub const R_LARCH_TLS_GD_HI20: u32 = 98;
 /// 32-bit PC relative
 pub const R_LARCH_32_PCREL: u32 = 99;
 /// Paired with a normal relocation at the same address to indicate the
-/// insturction can be relaxed
+/// instruction can be relaxed
 pub const R_LARCH_RELAX: u32 = 100;
+/// Reserved
+pub const R_LARCH_DELETE: u32 = 101;
+/// Delete some bytes to ensure the instruction at PC + A aligned to
+/// `A.next_power_of_two()`-byte boundary
+pub const R_LARCH_ALIGN: u32 = 102;
+/// 22-bit PC-relative offset with two trailing zeros
+pub const R_LARCH_PCREL20_S2: u32 = 103;
+/// Reserved
+pub const R_LARCH_CFA: u32 = 104;
+/// 6-bit in-place addition
+pub const R_LARCH_ADD6: u32 = 105;
+/// 6-bit in-place subtraction
+pub const R_LARCH_SUB6: u32 = 106;
+/// LEB128 in-place addition
+pub const R_LARCH_ADD_ULEB128: u32 = 107;
+/// LEB128 in-place subtraction
+pub const R_LARCH_SUB_ULEB128: u32 = 108;
+/// 64-bit PC relative
+pub const R_LARCH_64_PCREL: u32 = 109;
+/// 18..=37 bits of `S + A - PC` into the `pcaddu18i` instruction at `PC`,
+/// and 2..=17 bits of `S + A - PC` into the `jirl` instruction at `PC + 4`
+pub const R_LARCH_CALL36: u32 = 110;
 
 // Xtensa values Rel*::r_type`.
 pub const R_XTENSA_NONE: u32 = 0;
@@ -6119,6 +6284,172 @@ pub const R_XTENSA_NDIFF8: u32 = 60;
 pub const R_XTENSA_NDIFF16: u32 = 61;
 pub const R_XTENSA_NDIFF32: u32 = 62;
 
+// E2K values for `FileHeader*::e_flags`.
+pub const EF_E2K_IPD: u32 = 3;
+pub const EF_E2K_X86APP: u32 = 4;
+pub const EF_E2K_4MB_PAGES: u32 = 8;
+pub const EF_E2K_INCOMPAT: u32 = 16;
+pub const EF_E2K_PM: u32 = 32;
+pub const EF_E2K_PACK_SEGMENTS: u32 = 64;
+
+/// Encode `E_E2K_MACH_*` into `FileHeader*::e_flags`.
+pub const fn ef_e2k_mach_to_flag(e_flags: u32, x: u32) -> u32 {
+    (e_flags & 0xffffff) | (x << 24)
+}
+
+/// Decode `E_E2K_MACH_*` from `FileHeader*::e_flags`.
+pub const fn ef_e2k_flag_to_mach(e_flags: u32) -> u32 {
+    e_flags >> 24
+}
+
+// Codes of supported E2K machines.
+
+/// -march=generic code.
+///
+/// Legacy. Shouldn't be created nowadays.
+pub const E_E2K_MACH_BASE: u32 = 0;
+/// -march=elbrus-v1 code.
+///
+/// Legacy. Shouldn't be created nowadays.
+pub const E_E2K_MACH_EV1: u32 = 1;
+/// -march=elbrus-v2 code.
+pub const E_E2K_MACH_EV2: u32 = 2;
+/// -march=elbrus-v3 code.
+pub const E_E2K_MACH_EV3: u32 = 3;
+/// -march=elbrus-v4 code.
+pub const E_E2K_MACH_EV4: u32 = 4;
+/// -march=elbrus-v5 code.
+pub const E_E2K_MACH_EV5: u32 = 5;
+/// -march=elbrus-v6 code.
+pub const E_E2K_MACH_EV6: u32 = 6;
+/// -march=elbrus-v7 code.
+pub const E_E2K_MACH_EV7: u32 = 7;
+/// -mtune=elbrus-8c code.
+pub const E_E2K_MACH_8C: u32 = 19;
+/// -mtune=elbrus-1c+ code.
+pub const E_E2K_MACH_1CPLUS: u32 = 20;
+/// -mtune=elbrus-12c code.
+pub const E_E2K_MACH_12C: u32 = 21;
+/// -mtune=elbrus-16c code.
+pub const E_E2K_MACH_16C: u32 = 22;
+/// -mtune=elbrus-2c3 code.
+pub const E_E2K_MACH_2C3: u32 = 23;
+/// -mtune=elbrus-48c code.
+pub const E_E2K_MACH_48C: u32 = 24;
+/// -mtune=elbrus-8v7 code.
+pub const E_E2K_MACH_8V7: u32 = 25;
+
+// E2K values `Rel*::r_type`.
+
+/// Direct 32 bit.
+pub const R_E2K_32_ABS: u32 = 0;
+/// PC relative 32 bit.
+pub const R_E2K_32_PC: u32 = 2;
+/// 32-bit offset of AP GOT entry.
+pub const R_E2K_AP_GOT: u32 = 3;
+/// 32-bit offset of PL GOT entry.
+pub const R_E2K_PL_GOT: u32 = 4;
+/// Create PLT entry.
+pub const R_E2K_32_JMP_SLOT: u32 = 8;
+/// Copy relocation, 32-bit case.
+pub const R_E2K_32_COPY: u32 = 9;
+/// Adjust by program base, 32-bit case.
+pub const R_E2K_32_RELATIVE: u32 = 10;
+/// Adjust indirectly by program base, 32-bit case.
+pub const R_E2K_32_IRELATIVE: u32 = 11;
+/// Size of symbol plus 32-bit addend.
+pub const R_E2K_32_SIZE: u32 = 12;
+/// Symbol value if resolved by the definition in the same
+/// compilation unit or NULL otherwise, 32-bit case.
+pub const R_E2K_32_DYNOPT: u32 = 13;
+/// Direct 64 bit.
+pub const R_E2K_64_ABS: u32 = 50;
+/// Direct 64 bit for literal.
+pub const R_E2K_64_ABS_LIT: u32 = 51;
+/// PC relative 64 bit for literal.
+pub const R_E2K_64_PC_LIT: u32 = 54;
+/// Create PLT entry, 64-bit case.
+pub const R_E2K_64_JMP_SLOT: u32 = 63;
+/// Copy relocation, 64-bit case.
+pub const R_E2K_64_COPY: u32 = 64;
+/// Adjust by program base, 64-bit case.
+pub const R_E2K_64_RELATIVE: u32 = 65;
+/// Adjust by program base for literal, 64-bit case.
+pub const R_E2K_64_RELATIVE_LIT: u32 = 66;
+/// Adjust indirectly by program base, 64-bit case.
+pub const R_E2K_64_IRELATIVE: u32 = 67;
+/// Size of symbol plus 64-bit addend.
+pub const R_E2K_64_SIZE: u32 = 68;
+/// 64-bit offset of the symbol from GOT.
+pub const R_E2K_64_GOTOFF: u32 = 69;
+
+/// GOT entry for ID of module containing symbol.
+pub const R_E2K_TLS_GDMOD: u32 = 70;
+/// GOT entry for offset in module TLS block.
+pub const R_E2K_TLS_GDREL: u32 = 71;
+/// Static TLS block offset GOT entry.
+pub const R_E2K_TLS_IE: u32 = 74;
+/// Offset relative to static TLS block, 32-bit case.
+pub const R_E2K_32_TLS_LE: u32 = 75;
+/// Offset relative to static TLS block, 64-bit case.
+pub const R_E2K_64_TLS_LE: u32 = 76;
+/// ID of module containing symbol, 32-bit case.
+pub const R_E2K_TLS_32_DTPMOD: u32 = 80;
+/// Offset in module TLS block, 32-bit case.
+pub const R_E2K_TLS_32_DTPREL: u32 = 81;
+/// ID of module containing symbol, 64-bit case.
+pub const R_E2K_TLS_64_DTPMOD: u32 = 82;
+/// Offset in module TLS block, 64-bit case.
+pub const R_E2K_TLS_64_DTPREL: u32 = 83;
+/// Offset in static TLS block, 32-bit case.
+pub const R_E2K_TLS_32_TPREL: u32 = 84;
+/// Offset in static TLS block, 64-bit case.
+pub const R_E2K_TLS_64_TPREL: u32 = 85;
+
+/// Direct AP.
+pub const R_E2K_AP: u32 = 100;
+/// Direct PL.
+pub const R_E2K_PL: u32 = 101;
+
+/// 32-bit offset of the symbol's entry in GOT.
+pub const R_E2K_GOT: u32 = 108;
+/// 32-bit offset of the symbol from GOT.
+pub const R_E2K_GOTOFF: u32 = 109;
+/// PC relative 28 bit for DISP.
+pub const R_E2K_DISP: u32 = 110;
+/// Prefetch insn line containing the label (symbol).
+pub const R_E2K_PREF: u32 = 111;
+/// No reloc.
+pub const R_E2K_NONE: u32 = 112;
+/// 32-bit offset of the symbol's entry in .got.plt.
+pub const R_E2K_GOTPLT: u32 = 114;
+/// Is symbol resolved locally during the link.
+/// The result is encoded in 5-bit ALS.src1.
+pub const R_E2K_ISLOCAL: u32 = 115;
+/// Is symbol resloved locally during the link.
+/// The result is encoded in a long 32-bit LTS.
+pub const R_E2K_ISLOCAL32: u32 = 118;
+/// The symbol's offset from GOT encoded within a 64-bit literal.
+pub const R_E2K_64_GOTOFF_LIT: u32 = 256;
+/// Symbol value if resolved by the definition in the same
+/// compilation unit or NULL otherwise, 64-bit case.
+pub const R_E2K_64_DYNOPT: u32 = 257;
+/// PC relative 64 bit in data.
+pub const R_E2K_64_PC: u32 = 258;
+
+// E2K values for `Dyn32::d_tag`.
+
+pub const DT_E2K_LAZY: u32 = DT_LOPROC + 1;
+pub const DT_E2K_LAZY_GOT: u32 = DT_LOPROC + 3;
+
+pub const DT_E2K_INIT_GOT: u32 = DT_LOPROC + 0x101c;
+pub const DT_E2K_EXPORT_PL: u32 = DT_LOPROC + 0x101d;
+pub const DT_E2K_EXPORT_PLSZ: u32 = DT_LOPROC + 0x101e;
+pub const DT_E2K_REAL_PLTGOT: u32 = DT_LOPROC + 0x101f;
+pub const DT_E2K_NO_SELFINIT: u32 = DT_LOPROC + 0x1020;
+
+pub const DT_E2K_NUM: u32 = 0x1021;
+
 #[allow(non_upper_case_globals)]
 pub const Tag_File: u8 = 1;
 #[allow(non_upper_case_globals)]
@@ -6141,6 +6472,8 @@ unsafe_impl_endian_pod!(
     Rel64,
     Rela32,
     Rela64,
+    Relr32,
+    Relr64,
     ProgramHeader32,
     ProgramHeader64,
     Dyn32,

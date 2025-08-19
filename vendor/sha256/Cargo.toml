@@ -12,8 +12,14 @@
 [package]
 edition = "2018"
 name = "sha256"
-version = "1.4.0"
+version = "1.6.0"
 authors = ["baoyachi <liaoymxsdl@gmail.com>"]
+build = false
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
 description = "sha256 crypto digest"
 readme = "README.md"
 keywords = [
@@ -24,6 +30,15 @@ keywords = [
 categories = ["cryptography"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/baoyachi/sha256-rs"
+
+[features]
+async = ["tokio"]
+default = ["async"]
+native_openssl = ["openssl"]
+
+[lib]
+name = "sha256"
+path = "src/lib.rs"
 
 [dependencies.async-trait]
 version = "0.1.68"
@@ -57,8 +72,3 @@ features = ["full"]
 
 [dev-dependencies.tokio-test]
 version = "0.4.2"
-
-[features]
-async = ["tokio"]
-default = ["async"]
-native_openssl = ["openssl"]

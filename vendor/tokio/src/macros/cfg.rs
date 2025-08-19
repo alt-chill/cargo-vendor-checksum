@@ -1,5 +1,26 @@
 #![allow(unused_macros)]
 
+/// Allows specifying arbitrary combinations of features and config flags,
+/// which are also propagated to `docsrs` config.
+///
+/// Each contained item will have the annotations applied
+///
+/// ## Example usage:
+/// ```no-compile
+/// feature! {
+/// #![any(
+///     feature = "process",
+///     feature = "sync",
+///     feature = "rt",
+///     tokio_unstable
+/// )]
+///     /// docs
+///     pub struct MyStruct {};
+///     /// docs
+///     pub struct AnotherStruct {};
+/// }
+/// ```
+///
 macro_rules! feature {
     (
         #![$meta:meta]
@@ -25,6 +46,18 @@ macro_rules! cfg_windows {
     }
 }
 
+/// Enables Unix-specific code.
+/// Use this macro instead of `cfg(unix)` to generate docs properly.
+macro_rules! cfg_unix {
+    ($($item:item)*) => {
+        $(
+            #[cfg(any(all(doc, docsrs), unix))]
+            #[cfg_attr(docsrs, doc(cfg(unix)))]
+            $item
+        )*
+    }
+}
+
 /// Enables unstable Windows-specific code.
 /// Use this macro instead of `cfg(windows)` to generate docs properly.
 macro_rules! cfg_unstable_windows {
@@ -37,7 +70,7 @@ macro_rules! cfg_unstable_windows {
     }
 }
 
-/// Enables enter::block_on.
+/// Enables `enter::block_on`.
 macro_rules! cfg_block_on {
     ($($item:item)*) => {
         $(
@@ -85,7 +118,6 @@ macro_rules! cfg_fs {
     ($($item:item)*) => {
         $(
             #[cfg(feature = "fs")]
-            #[cfg(not(target_os = "wasi"))]
             #[cfg_attr(docsrs, doc(cfg(feature = "fs")))]
             $item
         )*
@@ -109,11 +141,23 @@ macro_rules! cfg_io_driver {
                 feature = "net",
                 all(unix, feature = "process"),
                 all(unix, feature = "signal"),
+                all(
+                    tokio_uring,
+                    feature = "rt",
+                    feature = "fs",
+                    target_os = "linux"
+                )
             ))]
             #[cfg_attr(docsrs, doc(cfg(any(
                 feature = "net",
                 all(unix, feature = "process"),
                 all(unix, feature = "signal"),
+                all(
+                    tokio_uring,
+                    feature = "rt",
+                    feature = "fs",
+                    target_os = "linux"
+                )
             ))))]
             $item
         )*
@@ -127,6 +171,12 @@ macro_rules! cfg_io_driver_impl {
                 feature = "net",
                 all(unix, feature = "process"),
                 all(unix, feature = "signal"),
+                all(
+                    tokio_uring,
+                    feature = "rt",
+                    feature = "fs",
+                    target_os = "linux"
+                )
             ))]
             $item
         )*
@@ -140,6 +190,12 @@ macro_rules! cfg_not_io_driver {
                 feature = "net",
                 all(unix, feature = "process"),
                 all(unix, feature = "signal"),
+                all(
+                    tokio_uring,
+                    feature = "rt",
+                    feature = "fs",
+                    target_os = "linux"
+                )
             )))]
             $item
         )*
@@ -203,22 +259,40 @@ macro_rules! cfg_macros {
     }
 }
 
-macro_rules! cfg_metrics {
+macro_rules! cfg_unstable_metrics {
     ($($item:item)*) => {
         $(
-            // For now, metrics is only disabled in loom tests.
-            // When stabilized, it might have a dedicated feature flag.
-            #[cfg(all(tokio_unstable, not(loom)))]
+            #[cfg(tokio_unstable)]
             #[cfg_attr(docsrs, doc(cfg(tokio_unstable)))]
             $item
         )*
     }
 }
 
-macro_rules! cfg_not_metrics {
+/// Some metrics require 64-bit atomics.
+macro_rules! cfg_64bit_metrics {
     ($($item:item)*) => {
         $(
-            #[cfg(not(all(tokio_unstable, not(loom))))]
+            #[cfg(target_has_atomic = "64")]
+            #[cfg_attr(docsrs, doc(cfg(target_has_atomic = "64")))]
+            $item
+        )*
+    }
+}
+
+macro_rules! cfg_no_64bit_metrics {
+    ($($item:item)*) => {
+        $(
+            #[cfg(not(target_has_atomic = "64"))]
+            $item
+        )*
+    }
+}
+
+macro_rules! cfg_not_unstable_metrics {
+    ($($item:item)*) => {
+        $(
+            #[cfg(not(tokio_unstable))]
             $item
         )*
     }
@@ -226,7 +300,7 @@ macro_rules! cfg_not_metrics {
 
 macro_rules! cfg_not_rt_and_metrics_and_net {
     ($($item:item)*) => {
-        $( #[cfg(not(all(feature = "net", feature = "rt", all(tokio_unstable, not(loom)))))]$item )*
+        $( #[cfg(not(all(feature = "net", feature = "rt", tokio_unstable)))]$item )*
     }
 }
 
@@ -245,6 +319,35 @@ macro_rules! cfg_net {
         $(
             #[cfg(feature = "net")]
             #[cfg_attr(docsrs, doc(cfg(feature = "net")))]
+            $item
+        )*
+    }
+}
+
+macro_rules! cfg_net_or_uring {
+    ($($item:item)*) => {
+        $(
+            #[cfg(any(
+                feature = "net",
+                all(
+                    tokio_uring,
+                    feature = "rt",
+                    feature = "fs",
+                    target_os = "linux",
+                )
+            ))]
+            #[cfg_attr(
+                docsrs,
+                doc(cfg(any(
+                    feature = "net",
+                    all(
+                        tokio_uring,
+                        feature = "rt",
+                        feature = "fs",
+                        target_os = "linux",
+                    )
+                )))
+            )]
             $item
         )*
     }
@@ -372,7 +475,7 @@ macro_rules! cfg_not_rt {
 macro_rules! cfg_rt_multi_thread {
     ($($item:item)*) => {
         $(
-            #[cfg(all(feature = "rt-multi-thread", not(target_os = "wasi")))]
+            #[cfg(feature = "rt-multi-thread")]
             #[cfg_attr(docsrs, doc(cfg(feature = "rt-multi-thread")))]
             $item
         )*
@@ -572,4 +675,32 @@ macro_rules! cfg_is_wasm_not_wasi {
             $item
         )*
     }
+}
+
+/// Use this macro to provide two different implementations of the same API — one for stable
+/// builds and one for unstable builds.
+macro_rules! cfg_metrics_variant {
+    (stable: {$($stable_code:tt)*}, unstable: {$($unstable_code:tt)*}) => {
+        cfg_not_unstable_metrics! {
+            $($stable_code)*
+        }
+
+        cfg_unstable_metrics! {
+            $($unstable_code)*
+        }
+    }
+}
+
+macro_rules! cfg_tokio_uring {
+    ($($item:item)*) => {
+        $(
+            #[cfg(all(
+                tokio_uring,
+                feature = "rt",
+                feature = "fs",
+                target_os = "linux",
+            ))]
+            $item
+        )*
+    };
 }

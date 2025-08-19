@@ -67,7 +67,7 @@ fn test_random() {
 }
 
 #[test]
-#[cfg_attr(miri, ignore)]
+#[cfg_attr(miri, ignore = "too slow for miri")]
 fn test_non_finite() {
     for i in 0u64..1 << 23 {
         let f = f64::from_bits((((1 << 11) - 1) << 52) + (i << 29));
@@ -82,7 +82,8 @@ fn test_basic() {
     check!(-0.0);
     check!(1.0);
     check!(-1.0);
-    assert_eq!(pretty(f64::NAN), "NaN");
+    assert_eq!(pretty(f64::NAN.copysign(1.0)), "NaN");
+    assert_eq!(pretty(f64::NAN.copysign(-1.0)), "NaN");
     assert_eq!(pretty(f64::INFINITY), "inf");
     assert_eq!(pretty(f64::NEG_INFINITY), "-inf");
 }

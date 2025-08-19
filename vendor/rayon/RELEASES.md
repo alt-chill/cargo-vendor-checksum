@@ -1,3 +1,48 @@
+# Release rayon 1.11.0 / rayon-core 1.13.0 (2025-08-12)
+
+- The minimum supported `rustc` is now 1.80.
+- `iter::repeatn` has been renamed to `iter::repeat_n` to match the name
+  stabilized in the standard library. The old name still exists as a deprecated
+  function for compatibility.
+- Fixed a bug in `in_place_scope` when the default global registry uses the
+  current thread, like on WebAssembly without threading support.
+- `binary_heap::Iter` no longer requires a temporary allocation.
+- Relaxed trait bounds on many of the public structs.
+- Implemented `IntoParallelIterator for Box<[T]>` and its references.
+- Implemented `FromParallelIterator<_> for Box<str>` via `String`.
+
+# Release rayon 1.10.0 (2024-03-23)
+
+- The new methods `ParallelSlice::par_chunk_by` and
+  `ParallelSliceMut::par_chunk_by_mut` work like the slice methods `chunk_by`
+  and `chunk_by_mut` added in Rust 1.77.
+
+# Release rayon 1.9.0 (2024-02-27)
+
+- The new methods `IndexedParallelIterator::by_exponential_blocks` and
+  `by_uniform_blocks` allow processing items in smaller groups at a time.
+- The new `iter::walk_tree`, `walk_tree_prefix`, and `walk_tree_postfix`
+  functions enable custom parallel iteration over tree-like structures.
+- The new method `ParallelIterator::collect_vec_list` returns items as a linked
+  list of vectors, which is an efficient mode of parallel collection used by
+  many of the internal implementations of `collect`.
+- The new methods `ParallelSliceMut::par_split_inclusive_mut`,
+  `ParallelSlice::par_split_inclusive`, and
+  `ParallelString::par_split_inclusive` all work like a normal split but
+  keeping the separator as part of the left slice.
+- The new `ParallelString::par_split_ascii_whitespace` splits only on ASCII
+  whitespace, which is faster than including Unicode multi-byte whitespace.
+- `OsString` now implements `FromParallelIterator<_>` and `ParallelExtend<_>`
+  for a few item types similar to the standard `FromIterator` and `Extend`.
+- The internal `Pattern` trait for string methods is now implemented for
+  `[char; N]` and `&[char; N]`, matching any of the given characters.
+
+# Release rayon 1.8.1 / rayon-core 1.12.1 (2024-01-17)
+
+- The new `"web_spin_lock"` crate feature makes mutexes spin on the main
+  browser thread in WebAssembly, rather than suffer an error about forbidden
+  `atomics.wait` if they were to block in that context. Thanks @RReverser!
+
 # Release rayon 1.8.0 / rayon-core 1.12.0 (2023-09-20)
 
 - The minimum supported `rustc` is now 1.63.
@@ -337,8 +382,8 @@ Thanks to all of the contributors for this release!
 - @seanchen1991
 - @yegeun542
 
-[RFC 1]: https://github.com/rayon-rs/rfcs/blob/master/accepted/rfc0001-scope-scheduling.md
-[RFC 3]: https://github.com/rayon-rs/rfcs/blob/master/accepted/rfc0003-minimum-rustc.md
+[RFC 1]: https://github.com/rayon-rs/rfcs/blob/main/accepted/rfc0001-scope-scheduling.md
+[RFC 3]: https://github.com/rayon-rs/rfcs/blob/main/accepted/rfc0003-minimum-rustc.md
 
 
 # Release rayon 1.0.3 (2018-11-02)
@@ -555,12 +600,12 @@ Thanks to all of the contributors for this release!
 # Release rayon 0.8.1 / rayon-core 1.2.0 (2017-06-14)
 
 - The following core APIs are being stabilized:
-  - `rayon::spawn()` -- spawns a task into the Rayon threadpool; as it
+  - `rayon::spawn()` -- spawns a task into the Rayon thread pool; as it
     is contained in the global scope (rather than a user-created
     scope), the task cannot capture anything from the current stack
     frame.
   - `ThreadPool::join()`, `ThreadPool::spawn()`, `ThreadPool::scope()`
-    -- convenience APIs for launching new work within a thread-pool.
+    -- convenience APIs for launching new work within a thread pool.
 - The various iterator adapters are now tagged with `#[must_use]`
 - Parallel iterators now offer a `for_each_with` adapter, similar to
   `map_with`.
@@ -604,13 +649,13 @@ Thanks to all of the contributors for this release!
   `spawn_future_async` -- which spawn tasks that cannot hold
   references -- to simply `spawn` and `spawn_future`, respectively.
 - We are now using the coco library for our deque.
-- Individual threadpools can now be configured in "breadth-first"
+- Individual thread pools can now be configured in "breadth-first"
   mode, which causes them to execute spawned tasks in the reverse
   order that they used to.  In some specific scenarios, this can be a
   win (though it is not generally the right choice).
 - Added top-level functions:
   - `current_thread_index`, for querying the index of the current worker thread within
-    its thread-pool (previously available as `thread_pool.current_thread_index()`);
+    its thread pool (previously available as `thread_pool.current_thread_index()`);
   - `current_thread_has_pending_tasks`, for querying whether the
     current worker that has an empty task deque or not. This can be
     useful when deciding whether to spawn a task.
@@ -723,7 +768,7 @@ releases) and hence they should be avoided for production code.
 - We now have (unstable) support for futures integration. You can use
   `Scope::spawn_future` or `rayon::spawn_future_async()`.
 - There is now a `rayon::spawn_async()` function for using the Rayon
-  threadpool to run tasks that do not have references to the stack.
+  thread pool to run tasks that do not have references to the stack.
 
 ### Contributors
 

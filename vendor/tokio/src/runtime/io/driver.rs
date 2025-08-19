@@ -2,6 +2,11 @@
 cfg_signal_internal_and_unix! {
     mod signal;
 }
+cfg_tokio_uring! {
+    mod uring;
+    use uring::UringContext;
+    use crate::loom::sync::atomic::AtomicUsize;
+}
 
 use crate::io::interest::Interest;
 use crate::io::ready::Ready;
@@ -18,10 +23,6 @@ use std::time::Duration;
 
 /// I/O driver, backed by Mio.
 pub(crate) struct Driver {
-    /// Tracks the number of times `turn` is called. It is safe for this to wrap
-    /// as it is mostly used to determine when to call `compact()`.
-    tick: u8,
-
     /// True when an event with the signal token is received
     signal_ready: bool,
 
@@ -44,11 +45,17 @@ pub(crate) struct Handle {
     synced: Mutex<registration_set::Synced>,
 
     /// Used to wake up the reactor from a call to `turn`.
-    /// Not supported on Wasi due to lack of threading support.
+    /// Not supported on `Wasi` due to lack of threading support.
     #[cfg(not(target_os = "wasi"))]
     waker: mio::Waker,
 
     pub(crate) metrics: IoDriverMetrics,
+
+    #[cfg(all(tokio_uring, feature = "rt", feature = "fs", target_os = "linux",))]
+    pub(crate) uring_context: Mutex<UringContext>,
+
+    #[cfg(all(tokio_uring, feature = "rt", feature = "fs", target_os = "linux",))]
+    pub(crate) uring_state: AtomicUsize,
 }
 
 #[derive(Debug)]
@@ -77,7 +84,7 @@ pub(super) enum Direction {
 }
 
 pub(super) enum Tick {
-    Set(u8),
+    Set,
     Clear(u8),
 }
 
@@ -102,7 +109,6 @@ impl Driver {
         let registry = poll.registry().try_clone()?;
 
         let driver = Driver {
-            tick: 0,
             signal_ready: false,
             events: mio::Events::with_capacity(nevents),
             poll,
@@ -117,6 +123,10 @@ impl Driver {
             #[cfg(not(target_os = "wasi"))]
             waker,
             metrics: IoDriverMetrics::default(),
+            #[cfg(all(tokio_uring, feature = "rt", feature = "fs", target_os = "linux",))]
+            uring_context: Mutex::new(UringContext::new()),
+            #[cfg(all(tokio_uring, feature = "rt", feature = "fs", target_os = "linux",))]
+            uring_state: AtomicUsize::new(0),
         };
 
         Ok((driver, handle))
@@ -145,8 +155,6 @@ impl Driver {
     fn turn(&mut self, handle: &Handle, max_wait: Option<Duration>) {
         debug_assert!(!handle.registrations.is_shutdown(&handle.synced.lock()));
 
-        self.tick = self.tick.wrapping_add(1);
-
         handle.release_pending_registrations();
 
         let events = &mut self.events;
@@ -154,14 +162,14 @@ impl Driver {
         // Block waiting for an event to happen, peeling out how many events
         // happened.
         match self.poll.poll(events, max_wait) {
-            Ok(_) => {}
+            Ok(()) => {}
             Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
             #[cfg(target_os = "wasi")]
             Err(e) if e.kind() == io::ErrorKind::InvalidInput => {
                 // In case of wasm32_wasi this error happens, when trying to poll without subscriptions
                 // just return from the park, as there would be nothing, which wakes us up.
             }
-            Err(e) => panic!("unexpected error when polling the I/O driver: {:?}", e),
+            Err(e) => panic!("unexpected error when polling the I/O driver: {e:?}"),
         }
 
         // Process all the events that came in, dispatching appropriately
@@ -175,8 +183,7 @@ impl Driver {
                 self.signal_ready = true;
             } else {
                 let ready = Ready::from_mio(event);
-                // Use std::ptr::from_exposed_addr when stable
-                let ptr: *const ScheduledIo = token.0 as *const _;
+                let ptr = super::EXPOSE_IO.from_exposed_addr(token.0);
 
                 // Safety: we ensure that the pointers used as tokens are not freed
                 // until they are both deregistered from mio **and** we know the I/O
@@ -184,11 +191,18 @@ impl Driver {
                 // an `Arc<ScheduledIo>` so we can safely cast this to a ref.
                 let io: &ScheduledIo = unsafe { &*ptr };
 
-                io.set_readiness(Tick::Set(self.tick), |curr| curr | ready);
+                io.set_readiness(Tick::Set, |curr| curr | ready);
                 io.wake(ready);
 
                 ready_count += 1;
             }
+        }
+
+        #[cfg(all(tokio_uring, feature = "rt", feature = "fs", target_os = "linux",))]
+        {
+            let mut guard = handle.get_uring().lock();
+            let ctx = &mut *guard;
+            ctx.dispatch_completions();
         }
 
         handle.metrics.incr_ready_count_by(ready_count);
@@ -227,8 +241,17 @@ impl Handle {
         let scheduled_io = self.registrations.allocate(&mut self.synced.lock())?;
         let token = scheduled_io.token();
 
-        // TODO: if this returns an err, the `ScheduledIo` leaks...
-        self.registry.register(source, token, interest.to_mio())?;
+        // we should remove the `scheduled_io` from the `registrations` set if registering
+        // the `source` with the OS fails. Otherwise it will leak the `scheduled_io`.
+        if let Err(e) = self.registry.register(source, token, interest.to_mio()) {
+            // safety: `scheduled_io` is part of the `registrations` set.
+            unsafe {
+                self.registrations
+                    .remove(&mut self.synced.lock(), &scheduled_io)
+            };
+
+            return Err(e);
+        }
 
         // TODO: move this logic to `RegistrationSet` and use a `CountedLinkedList`
         self.metrics.incr_fd_count();

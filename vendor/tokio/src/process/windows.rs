@@ -27,7 +27,8 @@ use std::io;
 use std::os::windows::prelude::{AsRawHandle, IntoRawHandle, OwnedHandle, RawHandle};
 use std::pin::Pin;
 use std::process::Stdio;
-use std::process::{Child as StdChild, Command as StdCommand, ExitStatus};
+use std::process::{Child as StdChild, ExitStatus};
+use std::ptr::null_mut;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
@@ -66,8 +67,7 @@ struct Waiting {
 unsafe impl Sync for Waiting {}
 unsafe impl Send for Waiting {}
 
-pub(crate) fn spawn_child(cmd: &mut StdCommand) -> io::Result<SpawnedChild> {
-    let mut child = cmd.spawn()?;
+pub(crate) fn build_child(mut child: StdChild) -> io::Result<SpawnedChild> {
     let stdin = child.stdin.take().map(stdio).transpose()?;
     let stdout = child.stdout.take().map(stdio).transpose()?;
     let stderr = child.stderr.take().map(stdio).transpose()?;
@@ -120,7 +120,7 @@ impl Future for Child {
             }
             let (tx, rx) = oneshot::channel();
             let ptr = Box::into_raw(Box::new(Some(tx)));
-            let mut wait_object = 0;
+            let mut wait_object = null_mut();
             let rc = unsafe {
                 RegisterWaitForSingleObject(
                     &mut wait_object,
@@ -242,7 +242,11 @@ where
     use std::os::windows::prelude::FromRawHandle;
 
     let raw = Arc::new(unsafe { StdFile::from_raw_handle(io.into_raw_handle()) });
-    let io = Blocking::new(ArcFile(raw.clone()));
+    let io = ArcFile(raw.clone());
+    // SAFETY: the `Read` implementation of `io` does not
+    // read from the buffer it is borrowing and correctly
+    // reports the length of the data written into the buffer.
+    let io = unsafe { Blocking::new(io) };
     Ok(ChildStdio { raw, io })
 }
 

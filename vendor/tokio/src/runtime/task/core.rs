@@ -14,10 +14,12 @@ use crate::loom::cell::UnsafeCell;
 use crate::runtime::context;
 use crate::runtime::task::raw::{self, Vtable};
 use crate::runtime::task::state::State;
-use crate::runtime::task::{Id, Schedule};
+use crate::runtime::task::{Id, Schedule, TaskHarnessScheduleHooks};
 use crate::util::linked_list;
 
 use std::num::NonZeroU64;
+#[cfg(tokio_unstable)]
+use std::panic::Location;
 use std::pin::Pin;
 use std::ptr::NonNull;
 use std::task::{Context, Poll, Waker};
@@ -28,7 +30,7 @@ use std::task::{Context, Poll, Waker};
 /// be referenced by both *mut Cell and *mut Header.
 ///
 /// Any changes to the layout of this struct _must_ also be reflected in the
-/// const fns in raw.rs.
+/// `const` fns in raw.rs.
 ///
 // # This struct should be cache padded to avoid false sharing. The cache padding rules are copied
 // from crossbeam-utils/src/cache_padded.rs
@@ -132,7 +134,7 @@ pub(super) struct CoreStage<T: Future> {
 /// Holds the future or output, depending on the stage of execution.
 ///
 /// Any changes to the layout of this struct _must_ also be reflected in the
-/// const fns in raw.rs.
+/// `const` fns in raw.rs.
 #[repr(C)]
 pub(super) struct Core<T: Future, S> {
     /// Scheduler used to drive this future.
@@ -140,6 +142,13 @@ pub(super) struct Core<T: Future, S> {
 
     /// The task's ID, used for populating `JoinError`s.
     pub(super) task_id: Id,
+
+    /// The source code location where the task was spawned.
+    ///
+    /// This is used for populating the `TaskMeta` passed to the task runtime
+    /// hooks.
+    #[cfg(tokio_unstable)]
+    pub(super) spawned_at: &'static Location<'static>,
 
     /// Either the future or the output.
     pub(super) stage: CoreStage<T>,
@@ -157,10 +166,10 @@ pub(crate) struct Header {
     /// Table of function pointers for executing actions on the task.
     pub(super) vtable: &'static Vtable,
 
-    /// This integer contains the id of the OwnedTasks or LocalOwnedTasks that
-    /// this task is stored in. If the task is not in any list, should be the
-    /// id of the list that it was previously in, or `None` if it has never been
-    /// in any list.
+    /// This integer contains the id of the `OwnedTasks` or `LocalOwnedTasks`
+    /// that this task is stored in. If the task is not in any list, should be
+    /// the id of the list that it was previously in, or `None` if it has never
+    /// been in any list.
     ///
     /// Once a task has been bound to a list, it can never be bound to another
     /// list, even if removed from the first list.
@@ -185,6 +194,8 @@ pub(super) struct Trailer {
     pub(super) owned: linked_list::Pointers<Header>,
     /// Consumer task waiting on completion of this task.
     pub(super) waker: UnsafeCell<Option<Waker>>,
+    /// Optional hooks needed in the harness.
+    pub(super) hooks: TaskHarnessScheduleHooks,
 }
 
 generate_addr_of_methods! {
@@ -196,6 +207,7 @@ generate_addr_of_methods! {
 }
 
 /// Either the future or the output.
+#[repr(C)] // https://github.com/rust-lang/miri/issues/3780
 pub(super) enum Stage<T: Future> {
     Running(T),
     Finished(super::Result<T::Output>),
@@ -205,7 +217,13 @@ pub(super) enum Stage<T: Future> {
 impl<T: Future, S: Schedule> Cell<T, S> {
     /// Allocates a new task cell, containing the header, trailer, and core
     /// structures.
-    pub(super) fn new(future: T, scheduler: S, state: State, task_id: Id) -> Box<Cell<T, S>> {
+    pub(super) fn new(
+        future: T,
+        scheduler: S,
+        state: State,
+        task_id: Id,
+        #[cfg(tokio_unstable)] spawned_at: &'static Location<'static>,
+    ) -> Box<Cell<T, S>> {
         // Separated into a non-generic function to reduce LLVM codegen
         fn new_header(
             state: State,
@@ -226,6 +244,7 @@ impl<T: Future, S: Schedule> Cell<T, S> {
         let tracing_id = future.id();
         let vtable = raw::vtable::<T, S>();
         let result = Box::new(Cell {
+            trailer: Trailer::new(scheduler.hooks()),
             header: new_header(
                 state,
                 vtable,
@@ -238,14 +257,21 @@ impl<T: Future, S: Schedule> Cell<T, S> {
                     stage: UnsafeCell::new(Stage::Running(future)),
                 },
                 task_id,
+                #[cfg(tokio_unstable)]
+                spawned_at,
             },
-            trailer: Trailer::new(),
         });
 
         #[cfg(debug_assertions)]
         {
             // Using a separate function for this code avoids instantiating it separately for every `T`.
-            unsafe fn check<S>(header: &Header, trailer: &Trailer, scheduler: &S, task_id: &Id) {
+            unsafe fn check<S>(
+                header: &Header,
+                trailer: &Trailer,
+                scheduler: &S,
+                task_id: &Id,
+                #[cfg(tokio_unstable)] spawn_location: &&'static Location<'static>,
+            ) {
                 let trailer_addr = trailer as *const Trailer as usize;
                 let trailer_ptr = unsafe { Header::get_trailer(NonNull::from(header)) };
                 assert_eq!(trailer_addr, trailer_ptr.as_ptr() as usize);
@@ -257,6 +283,15 @@ impl<T: Future, S: Schedule> Cell<T, S> {
                 let id_addr = task_id as *const Id as usize;
                 let id_ptr = unsafe { Header::get_id_ptr(NonNull::from(header)) };
                 assert_eq!(id_addr, id_ptr.as_ptr() as usize);
+
+                #[cfg(tokio_unstable)]
+                {
+                    let spawn_location_addr =
+                        spawn_location as *const &'static Location<'static> as usize;
+                    let spawn_location_ptr =
+                        unsafe { Header::get_spawn_location_ptr(NonNull::from(header)) };
+                    assert_eq!(spawn_location_addr, spawn_location_ptr.as_ptr() as usize);
+                }
             }
             unsafe {
                 check(
@@ -264,6 +299,8 @@ impl<T: Future, S: Schedule> Cell<T, S> {
                     &result.trailer,
                     &result.core.scheduler,
                     &result.core.task_id,
+                    #[cfg(tokio_unstable)]
+                    &result.core.spawned_at,
                 );
             }
         }
@@ -379,7 +416,7 @@ impl<T: Future, S: Schedule> Core<T, S> {
 
     unsafe fn set_stage(&self, stage: Stage<T>) {
         let _guard = TaskIdGuard::enter(self.task_id);
-        self.stage.stage.with_mut(|ptr| *ptr = stage)
+        self.stage.stage.with_mut(|ptr| *ptr = stage);
     }
 }
 
@@ -447,6 +484,37 @@ impl Header {
         *ptr
     }
 
+    /// Gets a pointer to the source code location where the task containing
+    /// this `Header` was spawned.
+    ///
+    /// # Safety
+    ///
+    /// The provided raw pointer must point at the header of a task.
+    #[cfg(tokio_unstable)]
+    pub(super) unsafe fn get_spawn_location_ptr(
+        me: NonNull<Header>,
+    ) -> NonNull<&'static Location<'static>> {
+        let offset = me.as_ref().vtable.spawn_location_offset;
+        let spawned_at = me
+            .as_ptr()
+            .cast::<u8>()
+            .add(offset)
+            .cast::<&'static Location<'static>>();
+        NonNull::new_unchecked(spawned_at)
+    }
+
+    /// Gets the source code location where the task containing
+    /// this `Header` was spawned
+    ///
+    /// # Safety
+    ///
+    /// The provided raw pointer must point at the header of a task.
+    #[cfg(tokio_unstable)]
+    pub(super) unsafe fn get_spawn_location(me: NonNull<Header>) -> &'static Location<'static> {
+        let ptr = Header::get_spawn_location_ptr(me).as_ptr();
+        *ptr
+    }
+
     /// Gets the tracing id of the task containing this `Header`.
     ///
     /// # Safety
@@ -459,10 +527,11 @@ impl Header {
 }
 
 impl Trailer {
-    fn new() -> Self {
+    fn new(hooks: TaskHarnessScheduleHooks) -> Self {
         Trailer {
             waker: UnsafeCell::new(None),
             owned: linked_list::Pointers::new(),
+            hooks,
         }
     }
 
@@ -488,7 +557,5 @@ impl Trailer {
 #[test]
 #[cfg(not(loom))]
 fn header_lte_cache_line() {
-    use std::mem::size_of;
-
-    assert!(size_of::<Header>() <= 8 * size_of::<*const ()>());
+    assert!(std::mem::size_of::<Header>() <= 8 * std::mem::size_of::<*const ()>());
 }

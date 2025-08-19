@@ -9,7 +9,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // This file contains an implementation of an OnceCell. The principle
-// behind the safety the of the cell is that any thread with an `&OnceCell` may
+// behind the safety of the cell is that any thread with an `&OnceCell` may
 // access the `value` field according the following rules:
 //
 //  1. When `value_set` is false, the `value` field may be modified by the
@@ -132,14 +132,55 @@ impl<T> OnceCell<T> {
         }
     }
 
+    /// Creates a new empty `OnceCell` instance.
+    ///
+    /// Equivalent to `OnceCell::new`, except that it can be used in static
+    /// variables.
+    ///
+    /// When using the `tracing` [unstable feature], a `OnceCell` created with
+    /// `const_new` will not be instrumented. As such, it will not be visible
+    /// in [`tokio-console`]. Instead, [`OnceCell::new`] should be used to
+    /// create an instrumented object if that is needed.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use tokio::sync::OnceCell;
+    ///
+    /// static ONCE: OnceCell<u32> = OnceCell::const_new();
+    ///
+    /// async fn get_global_integer() -> &'static u32 {
+    ///     ONCE.get_or_init(|| async {
+    ///         1 + 1
+    ///     }).await
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let result = get_global_integer().await;
+    ///     assert_eq!(*result, 2);
+    /// }
+    /// ```
+    ///
+    /// [`tokio-console`]: https://github.com/tokio-rs/console
+    /// [unstable feature]: crate#unstable-features
+    #[cfg(not(all(loom, test)))]
+    pub const fn const_new() -> Self {
+        OnceCell {
+            value_set: AtomicBool::new(false),
+            value: UnsafeCell::new(MaybeUninit::uninit()),
+            semaphore: Semaphore::const_new(1),
+        }
+    }
+
     /// Creates a new `OnceCell` that contains the provided value, if any.
     ///
     /// If the `Option` is `None`, this is equivalent to `OnceCell::new`.
     ///
     /// [`OnceCell::new`]: crate::sync::OnceCell::new
     // Once https://github.com/rust-lang/rust/issues/73255 lands
-    // and tokio MSRV is bumped to the rustc version with it stablised,
-    // we can made this function available in const context,
+    // and tokio MSRV is bumped to the rustc version with it stabilised,
+    // we can make this function available in const context,
     // by creating `Semaphore::const_new_closed`.
     pub fn new_with(value: Option<T>) -> Self {
         if let Some(v) = value {
@@ -184,47 +225,6 @@ impl<T> OnceCell<T> {
             value_set: AtomicBool::new(true),
             value: UnsafeCell::new(MaybeUninit::new(value)),
             semaphore: Semaphore::const_new_closed(),
-        }
-    }
-
-    /// Creates a new empty `OnceCell` instance.
-    ///
-    /// Equivalent to `OnceCell::new`, except that it can be used in static
-    /// variables.
-    ///
-    /// When using the `tracing` [unstable feature], a `OnceCell` created with
-    /// `const_new` will not be instrumented. As such, it will not be visible
-    /// in [`tokio-console`]. Instead, [`OnceCell::new`] should be used to
-    /// create an instrumented object if that is needed.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use tokio::sync::OnceCell;
-    ///
-    /// static ONCE: OnceCell<u32> = OnceCell::const_new();
-    ///
-    /// async fn get_global_integer() -> &'static u32 {
-    ///     ONCE.get_or_init(|| async {
-    ///         1 + 1
-    ///     }).await
-    /// }
-    ///
-    /// #[tokio::main]
-    /// async fn main() {
-    ///     let result = get_global_integer().await;
-    ///     assert_eq!(*result, 2);
-    /// }
-    /// ```
-    ///
-    /// [`tokio-console`]: https://github.com/tokio-rs/console
-    /// [unstable feature]: crate#unstable-features
-    #[cfg(not(all(loom, test)))]
-    pub const fn const_new() -> Self {
-        OnceCell {
-            value_set: AtomicBool::new(false),
-            value: UnsafeCell::new(MaybeUninit::uninit()),
-            semaphore: Semaphore::const_new(1),
         }
     }
 

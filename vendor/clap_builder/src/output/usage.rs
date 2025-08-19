@@ -14,6 +14,7 @@ use crate::util::FlatSet;
 use crate::util::Id;
 
 static DEFAULT_SUB_VALUE_NAME: &str = "COMMAND";
+const USAGE_SEP: &str = "\n       ";
 
 pub(crate) struct Usage<'cmd> {
     cmd: &'cmd Command,
@@ -39,8 +40,6 @@ impl<'cmd> Usage<'cmd> {
     // any subcommands have been parsed (so as to give subcommands their own usage recursively)
     pub(crate) fn create_usage_with_title(&self, used: &[Id]) -> Option<StyledStr> {
         debug!("Usage::create_usage_with_title");
-        let usage = some!(self.create_usage_no_title(used));
-
         use std::fmt::Write as _;
         let mut styled = StyledStr::new();
         let _ = write!(
@@ -49,73 +48,133 @@ impl<'cmd> Usage<'cmd> {
             self.styles.get_usage().render(),
             self.styles.get_usage().render_reset()
         );
-        styled.push_styled(&usage);
+        if self.write_usage_no_title(&mut styled, used) {
+            styled.trim_end();
+        } else {
+            return None;
+        }
+        debug!("Usage::create_usage_with_title: usage={styled}");
         Some(styled)
     }
 
     // Creates a usage string (*without title*) if one was not provided by the user manually.
     pub(crate) fn create_usage_no_title(&self, used: &[Id]) -> Option<StyledStr> {
         debug!("Usage::create_usage_no_title");
+
+        let mut styled = StyledStr::new();
+        if self.write_usage_no_title(&mut styled, used) {
+            styled.trim_end();
+            debug!("Usage::create_usage_no_title: usage={styled}");
+            Some(styled)
+        } else {
+            None
+        }
+    }
+
+    // Creates a usage string (*without title*) if one was not provided by the user manually.
+    fn write_usage_no_title(&self, styled: &mut StyledStr, used: &[Id]) -> bool {
+        debug!("Usage::create_usage_no_title");
         if let Some(u) = self.cmd.get_override_usage() {
-            Some(u.clone())
+            styled.push_styled(u);
+            true
         } else {
             #[cfg(feature = "usage")]
             {
                 if used.is_empty() {
-                    Some(self.create_help_usage(true))
+                    self.write_help_usage(styled);
                 } else {
-                    Some(self.create_smart_usage(used))
+                    self.write_smart_usage(styled, used);
                 }
+                true
             }
 
             #[cfg(not(feature = "usage"))]
             {
-                None
+                false
             }
         }
     }
 }
 
 #[cfg(feature = "usage")]
-impl<'cmd> Usage<'cmd> {
+impl Usage<'_> {
     // Creates a usage string for display in help messages (i.e. not for errors)
-    fn create_help_usage(&self, incl_reqs: bool) -> StyledStr {
-        debug!("Usage::create_help_usage; incl_reqs={incl_reqs:?}");
+    fn write_help_usage(&self, styled: &mut StyledStr) {
+        debug!("Usage::write_help_usage");
+        use std::fmt::Write;
+
+        if self.cmd.has_visible_subcommands() && self.cmd.is_flatten_help_set() {
+            if !self.cmd.is_subcommand_required_set()
+                || self.cmd.is_args_conflicts_with_subcommands_set()
+            {
+                self.write_arg_usage(styled, &[], true);
+                styled.trim_end();
+                let _ = write!(styled, "{USAGE_SEP}");
+            }
+            let mut cmd = self.cmd.clone();
+            cmd.build();
+            for (i, sub) in cmd
+                .get_subcommands()
+                .filter(|c| !c.is_hide_set())
+                .enumerate()
+            {
+                if i != 0 {
+                    styled.trim_end();
+                    let _ = write!(styled, "{USAGE_SEP}");
+                }
+                Usage::new(sub).write_usage_no_title(styled, &[]);
+            }
+        } else {
+            self.write_arg_usage(styled, &[], true);
+            self.write_subcommand_usage(styled);
+        }
+    }
+
+    // Creates a context aware usage string, or "smart usage" from currently used
+    // args, and requirements
+    fn write_smart_usage(&self, styled: &mut StyledStr, used: &[Id]) {
+        debug!("Usage::create_smart_usage");
+        use std::fmt::Write;
+        let placeholder = &self.styles.get_placeholder();
+
+        self.write_arg_usage(styled, used, true);
+
+        if self.cmd.is_subcommand_required_set() {
+            let value_name = self
+                .cmd
+                .get_subcommand_value_name()
+                .unwrap_or(DEFAULT_SUB_VALUE_NAME);
+            let _ = write!(styled, "{placeholder}<{value_name}>{placeholder:#}",);
+        }
+    }
+
+    fn write_arg_usage(&self, styled: &mut StyledStr, used: &[Id], incl_reqs: bool) {
+        debug!("Usage::write_arg_usage; incl_reqs={incl_reqs:?}");
         use std::fmt::Write as _;
         let literal = &self.styles.get_literal();
         let placeholder = &self.styles.get_placeholder();
-        let mut styled = StyledStr::new();
 
-        let name = self
-            .cmd
-            .get_usage_name()
-            .or_else(|| self.cmd.get_bin_name())
-            .unwrap_or_else(|| self.cmd.get_name());
-        if !name.is_empty() {
+        let bin_name = self.cmd.get_usage_name_fallback();
+        if !bin_name.is_empty() {
             // the trim won't properly remove a leading space due to the formatting
-            let _ = write!(
-                styled,
-                "{}{name}{}",
-                literal.render(),
-                literal.render_reset()
-            );
+            let _ = write!(styled, "{literal}{bin_name}{literal:#} ",);
         }
 
-        if self.needs_options_tag() {
-            let _ = write!(
-                styled,
-                "{} [OPTIONS]{}",
-                placeholder.render(),
-                placeholder.render_reset()
-            );
+        if used.is_empty() && self.needs_options_tag() {
+            let _ = write!(styled, "{placeholder}[OPTIONS]{placeholder:#} ",);
         }
 
-        self.write_args(&[], !incl_reqs, &mut styled);
+        self.write_args(styled, used, !incl_reqs);
+    }
+
+    fn write_subcommand_usage(&self, styled: &mut StyledStr) {
+        debug!("Usage::write_subcommand_usage");
+        use std::fmt::Write as _;
 
         // incl_reqs is only false when this function is called recursively
-        if self.cmd.has_visible_subcommands() && incl_reqs
-            || self.cmd.is_allow_external_subcommands_set()
-        {
+        if self.cmd.has_visible_subcommands() || self.cmd.is_allow_external_subcommands_set() {
+            let literal = &self.styles.get_literal();
+            let placeholder = &self.styles.get_placeholder();
             let value_name = self
                 .cmd
                 .get_subcommand_value_name()
@@ -123,81 +182,22 @@ impl<'cmd> Usage<'cmd> {
             if self.cmd.is_subcommand_negates_reqs_set()
                 || self.cmd.is_args_conflicts_with_subcommands_set()
             {
-                let _ = write!(styled, "\n       ");
+                styled.trim_end();
+                let _ = write!(styled, "{USAGE_SEP}");
                 if self.cmd.is_args_conflicts_with_subcommands_set() {
+                    let bin_name = self.cmd.get_usage_name_fallback();
                     // Short-circuit full usage creation since no args will be relevant
-                    let _ = write!(
-                        styled,
-                        "{}{name}{}",
-                        literal.render(),
-                        literal.render_reset()
-                    );
+                    let _ = write!(styled, "{literal}{bin_name}{literal:#} ",);
                 } else {
-                    styled.push_styled(&self.create_help_usage(false));
+                    self.write_arg_usage(styled, &[], false);
                 }
-                let _ = write!(
-                    styled,
-                    " {}<{value_name}>{}",
-                    placeholder.render(),
-                    placeholder.render_reset()
-                );
+                let _ = write!(styled, "{placeholder}<{value_name}>{placeholder:#}",);
             } else if self.cmd.is_subcommand_required_set() {
-                let _ = write!(
-                    styled,
-                    " {}<{value_name}>{}",
-                    placeholder.render(),
-                    placeholder.render_reset()
-                );
+                let _ = write!(styled, "{placeholder}<{value_name}>{placeholder:#}",);
             } else {
-                let _ = write!(
-                    styled,
-                    " {}[{value_name}]{}",
-                    placeholder.render(),
-                    placeholder.render_reset()
-                );
+                let _ = write!(styled, "{placeholder}[{value_name}]{placeholder:#}",);
             }
         }
-        styled.trim();
-        debug!("Usage::create_help_usage: usage={styled}");
-        styled
-    }
-
-    // Creates a context aware usage string, or "smart usage" from currently used
-    // args, and requirements
-    fn create_smart_usage(&self, used: &[Id]) -> StyledStr {
-        debug!("Usage::create_smart_usage");
-        use std::fmt::Write;
-        let literal = &self.styles.get_literal();
-        let placeholder = &self.styles.get_placeholder();
-        let mut styled = StyledStr::new();
-
-        let bin_name = self
-            .cmd
-            .get_usage_name()
-            .or_else(|| self.cmd.get_bin_name())
-            .unwrap_or_else(|| self.cmd.get_name());
-        let _ = write!(
-            styled,
-            "{}{bin_name}{}",
-            literal.render(),
-            literal.render_reset()
-        );
-
-        self.write_args(used, false, &mut styled);
-
-        if self.cmd.is_subcommand_required_set() {
-            let value_name = self
-                .cmd
-                .get_subcommand_value_name()
-                .unwrap_or(DEFAULT_SUB_VALUE_NAME);
-            let _ = write!(
-                styled,
-                " {}<{value_name}>{}",
-                placeholder.render(),
-                placeholder.render_reset()
-            );
-        }
-        styled
     }
 
     // Determines if we need the `[OPTIONS]` tag in the usage string
@@ -251,15 +251,8 @@ impl<'cmd> Usage<'cmd> {
     }
 
     // Returns the required args in usage string form by fully unrolling all groups
-    pub(crate) fn write_args(&self, incls: &[Id], force_optional: bool, styled: &mut StyledStr) {
-        for required in self.get_args(incls, force_optional) {
-            styled.push_str(" ");
-            styled.push_styled(&required);
-        }
-    }
-
-    pub(crate) fn get_args(&self, incls: &[Id], force_optional: bool) -> Vec<StyledStr> {
-        debug!("Usage::get_args: incls={incls:?}",);
+    pub(crate) fn write_args(&self, styled: &mut StyledStr, incls: &[Id], force_optional: bool) {
+        debug!("Usage::write_args: incls={incls:?}",);
         use std::fmt::Write as _;
         let literal = &self.styles.get_literal();
 
@@ -345,7 +338,7 @@ impl<'cmd> Usage<'cmd> {
                 if pos.is_last_set() {
                     let styled = required_positionals[index].take().unwrap();
                     let mut new = StyledStr::new();
-                    let _ = write!(new, "{}--{} ", literal.render(), literal.render_reset());
+                    let _ = write!(new, "{literal}--{literal:#} ");
                     new.push_styled(&styled);
                     required_positionals[index] = Some(new);
                 }
@@ -353,9 +346,9 @@ impl<'cmd> Usage<'cmd> {
                 let mut styled;
                 if pos.is_last_set() {
                     styled = StyledStr::new();
-                    let _ = write!(styled, "{}[--{} ", literal.render(), literal.render_reset());
+                    let _ = write!(styled, "{literal}[--{literal:#} ");
                     styled.push_styled(&pos.stylized(self.styles, Some(true)));
-                    let _ = write!(styled, "{}]{}", literal.render(), literal.render_reset());
+                    let _ = write!(styled, "{literal}]{literal:#}");
                 } else {
                     styled = pos.stylized(self.styles, Some(false));
                 }
@@ -366,17 +359,20 @@ impl<'cmd> Usage<'cmd> {
             }
         }
 
-        let mut ret_val = Vec::new();
         if !force_optional {
-            ret_val.extend(required_opts);
-            ret_val.extend(required_groups);
+            for arg in required_opts {
+                styled.push_styled(&arg);
+                styled.push_str(" ");
+            }
+            for arg in required_groups {
+                styled.push_styled(&arg);
+                styled.push_str(" ");
+            }
         }
-        for pos in required_positionals.into_iter().flatten() {
-            ret_val.push(pos);
+        for arg in required_positionals.into_iter().flatten() {
+            styled.push_styled(&arg);
+            styled.push_str(" ");
         }
-
-        debug!("Usage::get_args: ret_val={ret_val:?}");
-        ret_val
     }
 
     pub(crate) fn get_required_usage_from(

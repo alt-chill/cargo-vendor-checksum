@@ -10,13 +10,32 @@ use tokio::test as maybe_tokio_test;
 use tokio::sync::oneshot;
 use tokio_test::{assert_ok, assert_pending, assert_ready};
 
-use futures::future::poll_fn;
+use std::future::poll_fn;
 use std::task::Poll::Ready;
 
 #[maybe_tokio_test]
 async fn sync_one_lit_expr_comma() {
     let foo = tokio::select! {
         foo = async { 1 } => foo,
+    };
+
+    assert_eq!(foo, 1);
+}
+
+#[maybe_tokio_test]
+async fn no_branch_else_only() {
+    let foo = tokio::select! {
+        else => 1,
+    };
+
+    assert_eq!(foo, 1);
+}
+
+#[maybe_tokio_test]
+async fn no_branch_else_only_biased() {
+    let foo = tokio::select! {
+        biased;
+        else => 1,
     };
 
     assert_eq!(foo, 1);
@@ -671,4 +690,53 @@ mod unstable {
             x = async { 9 } => x,
         )
     }
+}
+
+#[tokio::test]
+async fn select_into_future() {
+    struct NotAFuture;
+    impl std::future::IntoFuture for NotAFuture {
+        type Output = ();
+        type IntoFuture = std::future::Ready<()>;
+
+        fn into_future(self) -> Self::IntoFuture {
+            std::future::ready(())
+        }
+    }
+
+    tokio::select! {
+        () = NotAFuture => {},
+    }
+}
+
+// regression test for https://github.com/tokio-rs/tokio/issues/6721
+#[tokio::test]
+async fn temporary_lifetime_extension() {
+    tokio::select! {
+        () = &mut std::future::ready(()) => {},
+    }
+}
+
+#[tokio::test]
+async fn select_is_budget_aware() {
+    const BUDGET: usize = 128;
+
+    let task = || {
+        Box::pin(async move {
+            tokio::select! {
+                biased;
+
+                () = tokio::task::coop::consume_budget() => {},
+                () = std::future::ready(()) => {}
+            }
+        })
+    };
+
+    for _ in 0..BUDGET {
+        let poll = futures::poll!(&mut task());
+        assert!(poll.is_ready());
+    }
+
+    let poll = futures::poll!(&mut task());
+    assert!(poll.is_pending());
 }

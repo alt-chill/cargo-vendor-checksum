@@ -37,6 +37,7 @@ impl AsRef<Path> for TempFifo {
 }
 
 #[tokio::test]
+#[cfg_attr(miri, ignore)] // No `mkfifo` in miri.
 async fn fifo_simple_send() -> io::Result<()> {
     const DATA: &[u8] = b"this is some data to write to the fifo";
 
@@ -67,7 +68,8 @@ async fn fifo_simple_send() -> io::Result<()> {
 }
 
 #[tokio::test]
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg_attr(miri, ignore)] // No `mkfifo` in miri.
 async fn fifo_simple_send_sender_first() -> io::Result<()> {
     const DATA: &[u8] = b"this is some data to write to the fifo";
 
@@ -104,6 +106,7 @@ async fn write_and_close(path: impl AsRef<Path>, msg: &[u8]) -> io::Result<()> {
 /// Checks EOF behavior with single reader and writers sequentially opening
 /// and closing a FIFO.
 #[tokio::test]
+#[cfg_attr(miri, ignore)] // No `mkfifo` in miri.
 async fn fifo_multiple_writes() -> io::Result<()> {
     const DATA: &[u8] = b"this is some data to write to the fifo";
 
@@ -131,7 +134,8 @@ async fn fifo_multiple_writes() -> io::Result<()> {
 /// Checks behavior of a resilient reader (Receiver in O_RDWR access mode)
 /// with writers sequentially opening and closing a FIFO.
 #[tokio::test]
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg_attr(miri, ignore)] // No `socket` in miri.
 async fn fifo_resilient_reader() -> io::Result<()> {
     const DATA: &[u8] = b"this is some data to write to the fifo";
 
@@ -162,6 +166,7 @@ async fn fifo_resilient_reader() -> io::Result<()> {
 }
 
 #[tokio::test]
+#[cfg_attr(miri, ignore)] // No `O_NONBLOCK` for open64 in miri.
 async fn open_detects_not_a_fifo() -> io::Result<()> {
     let dir = tempfile::Builder::new()
         .prefix("tokio-fifo-tests")
@@ -184,6 +189,7 @@ async fn open_detects_not_a_fifo() -> io::Result<()> {
 }
 
 #[tokio::test]
+#[cfg_attr(miri, ignore)] // No `mkfifo` in miri.
 async fn from_file() -> io::Result<()> {
     const DATA: &[u8] = b"this is some data to write to the fifo";
 
@@ -220,6 +226,7 @@ async fn from_file() -> io::Result<()> {
 }
 
 #[tokio::test]
+#[cfg_attr(miri, ignore)] // No `fstat` in miri.
 async fn from_file_detects_not_a_fifo() -> io::Result<()> {
     let dir = tempfile::Builder::new()
         .prefix("tokio-fifo-tests")
@@ -244,6 +251,7 @@ async fn from_file_detects_not_a_fifo() -> io::Result<()> {
 }
 
 #[tokio::test]
+#[cfg_attr(miri, ignore)] // No `mkfifo` in miri.
 async fn from_file_detects_wrong_access_mode() -> io::Result<()> {
     let fifo = TempFifo::new("wrong_access_mode")?;
 
@@ -275,6 +283,7 @@ fn is_nonblocking<T: AsRawFd>(fd: &T) -> io::Result<bool> {
 }
 
 #[tokio::test]
+#[cfg_attr(miri, ignore)] // No `mkfifo` in miri.
 async fn from_file_sets_nonblock() -> io::Result<()> {
     let fifo = TempFifo::new("sets_nonblock")?;
 
@@ -302,6 +311,7 @@ fn writable_by_poll(writer: &pipe::Sender) -> bool {
 }
 
 #[tokio::test]
+#[cfg_attr(miri, ignore)] // No `mkfifo` in miri.
 async fn try_read_write() -> io::Result<()> {
     const DATA: &[u8] = b"this is some data to write to the fifo";
 
@@ -342,6 +352,7 @@ async fn try_read_write() -> io::Result<()> {
 }
 
 #[tokio::test]
+#[cfg_attr(miri, ignore)] // No `mkfifo` in miri.
 async fn try_read_write_vectored() -> io::Result<()> {
     const DATA: &[u8] = b"this is some data to write to the fifo";
 
@@ -389,6 +400,7 @@ async fn try_read_write_vectored() -> io::Result<()> {
 }
 
 #[tokio::test]
+#[cfg_attr(miri, ignore)] // No `mkfifo` in miri.
 async fn try_read_buf() -> std::io::Result<()> {
     const DATA: &[u8] = b"this is some data to write to the fifo";
 
@@ -424,6 +436,111 @@ async fn try_read_buf() -> std::io::Result<()> {
     }
 
     assert_eq!(read_data, write_data);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn anon_pipe_simple_send() -> io::Result<()> {
+    const DATA: &[u8] = b"this is some data to write to the pipe";
+
+    let (mut writer, mut reader) = pipe::pipe()?;
+
+    // Create a reading task which should wait for data from the pipe.
+    let mut read_fut = task::spawn(async move {
+        let mut buf = vec![0; DATA.len()];
+        reader.read_exact(&mut buf).await?;
+        Ok::<_, io::Error>(buf)
+    });
+    assert_pending!(read_fut.poll());
+
+    writer.write_all(DATA).await?;
+
+    // Let the IO driver poll events for the reader.
+    while !read_fut.is_woken() {
+        tokio::task::yield_now().await;
+    }
+
+    // Reading task should be ready now.
+    let read_data = assert_ready_ok!(read_fut.poll());
+    assert_eq!(&read_data, DATA);
+
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)] // No `pidfd_spawnp` in miri.
+async fn anon_pipe_spawn_echo() -> std::io::Result<()> {
+    use tokio::process::Command;
+
+    const DATA: &str = "this is some data to write to the pipe";
+
+    let (tx, mut rx) = pipe::pipe()?;
+
+    let status = Command::new("echo")
+        .arg("-n")
+        .arg(DATA)
+        .stdout(tx.into_blocking_fd()?)
+        .status();
+
+    let mut buf = vec![0; DATA.len()];
+    rx.read_exact(&mut buf).await?;
+    assert_eq!(String::from_utf8(buf).unwrap(), DATA);
+
+    let exit_code = status.await?;
+    assert!(exit_code.success());
+
+    // Check if the pipe is closed.
+    buf = Vec::new();
+    let total = assert_ok!(rx.try_read(&mut buf));
+    assert_eq!(total, 0);
+
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(target_os = "linux")]
+#[cfg_attr(miri, ignore)] // No `fstat` in miri.
+async fn anon_pipe_from_owned_fd() -> std::io::Result<()> {
+    use nix::fcntl::OFlag;
+
+    const DATA: &[u8] = b"this is some data to write to the pipe";
+
+    let (rx_fd, tx_fd) = nix::unistd::pipe2(OFlag::O_CLOEXEC | OFlag::O_NONBLOCK)?;
+
+    let mut rx = pipe::Receiver::from_owned_fd(rx_fd)?;
+    let mut tx = pipe::Sender::from_owned_fd(tx_fd)?;
+
+    let mut buf = vec![0; DATA.len()];
+    tx.write_all(DATA).await?;
+    rx.read_exact(&mut buf).await?;
+    assert_eq!(buf, DATA);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn anon_pipe_into_nonblocking_fd() -> std::io::Result<()> {
+    let (tx, rx) = pipe::pipe()?;
+
+    let tx_fd = tx.into_nonblocking_fd()?;
+    let rx_fd = rx.into_nonblocking_fd()?;
+
+    assert!(is_nonblocking(&tx_fd)?);
+    assert!(is_nonblocking(&rx_fd)?);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn anon_pipe_into_blocking_fd() -> std::io::Result<()> {
+    let (tx, rx) = pipe::pipe()?;
+
+    let tx_fd = tx.into_blocking_fd()?;
+    let rx_fd = rx.into_blocking_fd()?;
+
+    assert!(!is_nonblocking(&tx_fd)?);
+    assert!(!is_nonblocking(&rx_fd)?);
 
     Ok(())
 }

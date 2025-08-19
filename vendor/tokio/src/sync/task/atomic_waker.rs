@@ -316,11 +316,12 @@ impl AtomicWaker {
         // memory the `AtomicWaker` is associated with.
         match self.state.fetch_or(WAKING, AcqRel) {
             WAITING => {
-                // The waking lock has been acquired.
+                // SAFETY: the waking lock has been acquired.
                 let waker = unsafe { self.waker.with_mut(|t| (*t).take()) };
 
-                // Release the lock
-                self.state.fetch_and(!WAKING, Release);
+                // Release the lock.
+                let old_state = self.state.swap(WAITING, Release);
+                debug_assert!(old_state == WAKING);
 
                 waker
             }
@@ -363,7 +364,7 @@ trait WakerRef {
 
 impl WakerRef for Waker {
     fn wake(self) {
-        self.wake()
+        self.wake();
     }
 
     fn into_waker(self) -> Waker {
@@ -373,7 +374,7 @@ impl WakerRef for Waker {
 
 impl WakerRef for &Waker {
     fn wake(self) {
-        self.wake_by_ref()
+        self.wake_by_ref();
     }
 
     fn into_waker(self) -> Waker {

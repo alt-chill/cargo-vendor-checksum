@@ -34,7 +34,7 @@ async fn local_current_thread_scheduler() {
 #[tokio::test(flavor = "multi_thread")]
 async fn local_threadpool() {
     thread_local! {
-        static ON_RT_THREAD: Cell<bool> = Cell::new(false);
+        static ON_RT_THREAD: Cell<bool> = const { Cell::new(false) };
     }
 
     ON_RT_THREAD.with(|cell| cell.set(true));
@@ -55,7 +55,7 @@ async fn local_threadpool() {
 #[tokio::test(flavor = "multi_thread")]
 async fn localset_future_threadpool() {
     thread_local! {
-        static ON_LOCAL_THREAD: Cell<bool> = Cell::new(false);
+        static ON_LOCAL_THREAD: Cell<bool> = const { Cell::new(false) };
     }
 
     ON_LOCAL_THREAD.with(|cell| cell.set(true));
@@ -118,7 +118,7 @@ async fn local_threadpool_timer() {
     // This test ensures that runtime services like the timer are properly
     // set for the local task set.
     thread_local! {
-        static ON_RT_THREAD: Cell<bool> = Cell::new(false);
+        static ON_RT_THREAD: Cell<bool> = const { Cell::new(false) };
     }
 
     ON_RT_THREAD.with(|cell| cell.set(true));
@@ -151,38 +151,130 @@ fn enter_guard_spawn() {
     });
 }
 
-#[cfg(not(target_os = "wasi"))] // Wasi doesn't support panic recovery
-#[test]
-// This will panic, since the thread that calls `block_on` cannot use
-// in-place blocking inside of `block_on`.
-#[should_panic]
-fn local_threadpool_blocking_in_place() {
-    thread_local! {
-        static ON_RT_THREAD: Cell<bool> = Cell::new(false);
+#[cfg(not(target_os = "wasi"))]
+mod block_in_place_cases {
+    use super::*;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    struct BlockInPlaceOnDrop;
+    impl Future for BlockInPlaceOnDrop {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            Poll::Pending
+        }
+    }
+    impl Drop for BlockInPlaceOnDrop {
+        fn drop(&mut self) {
+            tokio::task::block_in_place(|| {});
+        }
     }
 
-    ON_RT_THREAD.with(|cell| cell.set(true));
+    async fn complete(jh: tokio::task::JoinHandle<()>) {
+        match jh.await {
+            Ok(()) => {}
+            Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
+            Err(err) if err.is_cancelled() => panic!("task cancelled"),
+            Err(err) => panic!("{err:?}"),
+        }
+    }
 
-    let rt = runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    LocalSet::new().block_on(&rt, async {
-        assert!(ON_RT_THREAD.with(|cell| cell.get()));
-        let join = task::spawn_local(async move {
+    #[test]
+    #[should_panic = "can call blocking only when running on the multi-threaded runtime"]
+    fn local_threadpool_blocking_in_place() {
+        thread_local! {
+            static ON_RT_THREAD: Cell<bool> = const { Cell::new(false) };
+        }
+
+        ON_RT_THREAD.with(|cell| cell.set(true));
+
+        let rt = runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        LocalSet::new().block_on(&rt, async {
             assert!(ON_RT_THREAD.with(|cell| cell.get()));
-            task::block_in_place(|| {});
-            assert!(ON_RT_THREAD.with(|cell| cell.get()));
+            let join = task::spawn_local(async move {
+                assert!(ON_RT_THREAD.with(|cell| cell.get()));
+                task::block_in_place(|| {});
+                assert!(ON_RT_THREAD.with(|cell| cell.get()));
+            });
+            complete(join).await;
         });
-        join.await.unwrap();
-    });
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[should_panic = "can call blocking only when running on the multi-threaded runtime"]
+    async fn block_in_place_in_run_until_mt() {
+        let local_set = LocalSet::new();
+        local_set
+            .run_until(async {
+                tokio::task::block_in_place(|| {});
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[should_panic = "can call blocking only when running on the multi-threaded runtime"]
+    async fn block_in_place_in_spawn_local_mt() {
+        let local_set = LocalSet::new();
+        let jh = local_set.spawn_local(async {
+            tokio::task::block_in_place(|| {});
+        });
+        local_set.await;
+        complete(jh).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[should_panic = "can call blocking only when running on the multi-threaded runtime"]
+    async fn block_in_place_in_spawn_local_drop_mt() {
+        let local_set = LocalSet::new();
+        let jh = local_set.spawn_local(BlockInPlaceOnDrop);
+        local_set.run_until(tokio::task::yield_now()).await;
+        drop(local_set);
+        complete(jh).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[should_panic = "can call blocking only when running on the multi-threaded runtime"]
+    async fn block_in_place_in_run_until_ct() {
+        let local_set = LocalSet::new();
+        local_set
+            .run_until(async {
+                tokio::task::block_in_place(|| {});
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[should_panic = "can call blocking only when running on the multi-threaded runtime"]
+    async fn block_in_place_in_spawn_local_ct() {
+        let local_set = LocalSet::new();
+        let jh = local_set.spawn_local(async {
+            tokio::task::block_in_place(|| {});
+        });
+        local_set.await;
+        complete(jh).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[should_panic = "can call blocking only when running on the multi-threaded runtime"]
+    async fn block_in_place_in_spawn_local_drop_ct() {
+        let local_set = LocalSet::new();
+        let jh = local_set.spawn_local(BlockInPlaceOnDrop);
+        local_set.run_until(tokio::task::yield_now()).await;
+        drop(local_set);
+        complete(jh).await;
+    }
 }
 
 #[cfg(not(target_os = "wasi"))] // Wasi doesn't support threads
 #[tokio::test(flavor = "multi_thread")]
 async fn local_threadpool_blocking_run() {
     thread_local! {
-        static ON_RT_THREAD: Cell<bool> = Cell::new(false);
+        static ON_RT_THREAD: Cell<bool> = const { Cell::new(false) };
     }
 
     ON_RT_THREAD.with(|cell| cell.set(true));
@@ -212,7 +304,7 @@ async fn local_threadpool_blocking_run() {
 async fn all_spawns_are_local() {
     use futures::future;
     thread_local! {
-        static ON_RT_THREAD: Cell<bool> = Cell::new(false);
+        static ON_RT_THREAD: Cell<bool> = const { Cell::new(false) };
     }
 
     ON_RT_THREAD.with(|cell| cell.set(true));
@@ -238,7 +330,7 @@ async fn all_spawns_are_local() {
 #[tokio::test(flavor = "multi_thread")]
 async fn nested_spawn_is_local() {
     thread_local! {
-        static ON_RT_THREAD: Cell<bool> = Cell::new(false);
+        static ON_RT_THREAD: Cell<bool> = const { Cell::new(false) };
     }
 
     ON_RT_THREAD.with(|cell| cell.set(true));
@@ -274,7 +366,7 @@ async fn nested_spawn_is_local() {
 #[test]
 fn join_local_future_elsewhere() {
     thread_local! {
-        static ON_RT_THREAD: Cell<bool> = Cell::new(false);
+        static ON_RT_THREAD: Cell<bool> = const { Cell::new(false) };
     }
 
     ON_RT_THREAD.with(|cell| cell.set(true));
@@ -384,9 +476,8 @@ fn with_timeout(timeout: Duration, f: impl FnOnce() + Send + 'static) {
     // in case CI is slow, we'll give it a long timeout.
     match done_rx.recv_timeout(timeout) {
         Err(RecvTimeoutError::Timeout) => panic!(
-            "test did not complete within {:?} seconds, \
+            "test did not complete within {timeout:?} seconds, \
              we have (probably) entered an infinite loop!",
-            timeout,
         ),
         // Did the test thread panic? We'll find out for sure when we `join`
         // with it.
@@ -571,6 +662,27 @@ async fn spawn_wakes_localset() {
         _ = local.run_until(pending::<()>()).fuse() => unreachable!(),
         ret = async { local.spawn_local(ready(())).await.unwrap()}.fuse() => ret
     }
+}
+
+/// Checks that the task wakes up with `enter`.
+/// Reproduces <https://github.com/tokio-rs/tokio/issues/5020>.
+#[tokio::test]
+async fn sleep_with_local_enter_guard() {
+    let local = LocalSet::new();
+    let _guard = local.enter();
+
+    let (tx, rx) = oneshot::channel();
+
+    local
+        .run_until(async move {
+            tokio::task::spawn_local(async move {
+                time::sleep(Duration::ZERO).await;
+
+                tx.send(()).expect("failed to send");
+            });
+            assert_eq!(rx.await, Ok(()));
+        })
+        .await;
 }
 
 #[test]

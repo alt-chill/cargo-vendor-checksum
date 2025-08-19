@@ -27,6 +27,9 @@ use orphan::{OrphanQueue, OrphanQueueImpl, Wait};
 mod reap;
 use reap::Reaper;
 
+#[cfg(all(target_os = "linux", feature = "rt"))]
+mod pidfd_reaper;
+
 use crate::io::{AsyncRead, AsyncWrite, PollEvented, ReadBuf};
 use crate::process::kill::Kill;
 use crate::process::SpawnedChild;
@@ -63,11 +66,11 @@ impl Kill for StdChild {
 
 cfg_not_has_const_mutex_new! {
     fn get_orphan_queue() -> &'static OrphanQueueImpl<StdChild> {
-        use crate::util::once_cell::OnceCell;
+        use std::sync::OnceLock;
 
-        static ORPHAN_QUEUE: OnceCell<OrphanQueueImpl<StdChild>> = OnceCell::new();
+        static ORPHAN_QUEUE: OnceLock<OrphanQueueImpl<StdChild>> = OnceLock::new();
 
-        ORPHAN_QUEUE.get(OrphanQueueImpl::new)
+        ORPHAN_QUEUE.get_or_init(OrphanQueueImpl::new)
     }
 }
 
@@ -89,41 +92,52 @@ impl fmt::Debug for GlobalOrphanQueue {
 
 impl GlobalOrphanQueue {
     pub(crate) fn reap_orphans(handle: &SignalHandle) {
-        get_orphan_queue().reap_orphans(handle)
+        get_orphan_queue().reap_orphans(handle);
     }
 }
 
 impl OrphanQueue<StdChild> for GlobalOrphanQueue {
     fn push_orphan(&self, orphan: StdChild) {
-        get_orphan_queue().push_orphan(orphan)
+        get_orphan_queue().push_orphan(orphan);
     }
 }
 
 #[must_use = "futures do nothing unless polled"]
-pub(crate) struct Child {
-    inner: Reaper<StdChild, GlobalOrphanQueue, Signal>,
+pub(crate) enum Child {
+    SignalReaper(Reaper<StdChild, GlobalOrphanQueue, Signal>),
+    #[cfg(all(target_os = "linux", feature = "rt"))]
+    PidfdReaper(pidfd_reaper::PidfdReaper<StdChild, GlobalOrphanQueue>),
 }
 
 impl fmt::Debug for Child {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt.debug_struct("Child")
-            .field("pid", &self.inner.id())
-            .finish()
+        fmt.debug_struct("Child").field("pid", &self.id()).finish()
     }
 }
 
-pub(crate) fn spawn_child(cmd: &mut std::process::Command) -> io::Result<SpawnedChild> {
-    let mut child = cmd.spawn()?;
+pub(crate) fn build_child(mut child: StdChild) -> io::Result<SpawnedChild> {
     let stdin = child.stdin.take().map(stdio).transpose()?;
     let stdout = child.stdout.take().map(stdio).transpose()?;
     let stderr = child.stderr.take().map(stdio).transpose()?;
 
+    #[cfg(all(target_os = "linux", feature = "rt"))]
+    match pidfd_reaper::PidfdReaper::new(child, GlobalOrphanQueue) {
+        Ok(pidfd_reaper) => {
+            return Ok(SpawnedChild {
+                child: Child::PidfdReaper(pidfd_reaper),
+                stdin,
+                stdout,
+                stderr,
+            })
+        }
+        Err((Some(err), _child)) => return Err(err),
+        Err((None, child_returned)) => child = child_returned,
+    }
+
     let signal = signal(SignalKind::child())?;
 
     Ok(SpawnedChild {
-        child: Child {
-            inner: Reaper::new(child, GlobalOrphanQueue, signal),
-        },
+        child: Child::SignalReaper(Reaper::new(child, GlobalOrphanQueue, signal)),
         stdin,
         stdout,
         stderr,
@@ -132,25 +146,41 @@ pub(crate) fn spawn_child(cmd: &mut std::process::Command) -> io::Result<Spawned
 
 impl Child {
     pub(crate) fn id(&self) -> u32 {
-        self.inner.id()
+        match self {
+            Self::SignalReaper(signal_reaper) => signal_reaper.id(),
+            #[cfg(all(target_os = "linux", feature = "rt"))]
+            Self::PidfdReaper(pidfd_reaper) => pidfd_reaper.id(),
+        }
+    }
+
+    fn std_child(&mut self) -> &mut StdChild {
+        match self {
+            Self::SignalReaper(signal_reaper) => signal_reaper.inner_mut(),
+            #[cfg(all(target_os = "linux", feature = "rt"))]
+            Self::PidfdReaper(pidfd_reaper) => pidfd_reaper.inner_mut(),
+        }
     }
 
     pub(crate) fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
-        self.inner.inner_mut().try_wait()
+        self.std_child().try_wait()
     }
 }
 
 impl Kill for Child {
     fn kill(&mut self) -> io::Result<()> {
-        self.inner.kill()
+        self.std_child().kill()
     }
 }
 
 impl Future for Child {
     type Output = io::Result<ExitStatus>;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut self.inner).poll(cx)
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match Pin::into_inner(self) {
+            Self::SignalReaper(signal_reaper) => Pin::new(signal_reaper).poll(cx),
+            #[cfg(all(target_os = "linux", feature = "rt"))]
+            Self::PidfdReaper(pidfd_reaper) => Pin::new(pidfd_reaper).poll(cx),
+        }
     }
 }
 
@@ -168,13 +198,13 @@ impl<T: IntoRawFd> From<T> for Pipe {
     }
 }
 
-impl<'a> io::Read for &'a Pipe {
+impl io::Read for &Pipe {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
         (&self.fd).read(bytes)
     }
 }
 
-impl<'a> io::Write for &'a Pipe {
+impl io::Write for &Pipe {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         (&self.fd).write(bytes)
     }

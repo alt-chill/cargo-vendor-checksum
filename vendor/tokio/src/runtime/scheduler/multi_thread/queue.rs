@@ -36,8 +36,8 @@ pub(crate) struct Steal<T: 'static>(Arc<Inner<T>>);
 pub(crate) struct Inner<T: 'static> {
     /// Concurrently updated by many threads.
     ///
-    /// Contains two `UnsignedShort` values. The LSB byte is the "real" head of
-    /// the queue. The `UnsignedShort` in the MSB is set by a stealer in process
+    /// Contains two `UnsignedShort` values. The `LSB` byte is the "real" head of
+    /// the queue. The `UnsignedShort` in the `MSB` is set by a stealer in process
     /// of stealing values. It represents the first value being stolen in the
     /// batch. The `UnsignedShort` indices are intentionally wider than strictly
     /// required for buffer indexing in order to provide ABA mitigation and make
@@ -107,12 +107,19 @@ pub(crate) fn local<T: 'static>() -> (Steal<T>, Local<T>) {
 impl<T> Local<T> {
     /// Returns the number of entries in the queue
     pub(crate) fn len(&self) -> usize {
-        self.inner.len() as usize
+        let (_, head) = unpack(self.inner.head.load(Acquire));
+        // safety: this is the **only** thread that updates this cell.
+        let tail = unsafe { self.inner.tail.unsync_load() };
+        len(head, tail)
     }
 
     /// How many tasks can be pushed into the queue
     pub(crate) fn remaining_slots(&self) -> usize {
-        self.inner.remaining_slots()
+        let (steal, _) = unpack(self.inner.head.load(Acquire));
+        // safety: this is the **only** thread that updates this cell.
+        let tail = unsafe { self.inner.tail.unsync_load() };
+
+        LOCAL_QUEUE_CAPACITY - len(steal, tail)
     }
 
     pub(crate) fn max_capacity(&self) -> usize {
@@ -121,10 +128,10 @@ impl<T> Local<T> {
 
     /// Returns false if there are any entries in the queue
     ///
-    /// Separate to is_stealable so that refactors of is_stealable to "protect"
+    /// Separate to `is_stealable` so that refactors of `is_stealable` to "protect"
     /// some tasks from stealing won't affect this
     pub(crate) fn has_tasks(&self) -> bool {
-        !self.inner.is_empty()
+        self.len() != 0
     }
 
     /// Pushes a batch of tasks to the back of the queue. All tasks must fit in
@@ -179,7 +186,7 @@ impl<T> Local<T> {
     /// Pushes a task to the back of the local queue, if there is not enough
     /// capacity in the queue, this triggers the overflow operation.
     ///
-    /// When the queue overflows, half of the curent contents of the queue is
+    /// When the queue overflows, half of the current contents of the queue is
     /// moved to the given Injection queue. This frees up capacity for more
     /// tasks to be pushed into the local queue.
     pub(crate) fn push_back_or_overflow<O: Overflow<T>>(
@@ -264,9 +271,7 @@ impl<T> Local<T> {
         assert_eq!(
             tail.wrapping_sub(head) as usize,
             LOCAL_QUEUE_CAPACITY,
-            "queue is not full; tail = {}; head = {}",
-            tail,
-            head
+            "queue is not full; tail = {tail}; head = {head}"
         );
 
         let prev = pack(head, head);
@@ -386,8 +391,17 @@ impl<T> Local<T> {
 }
 
 impl<T> Steal<T> {
+    /// Returns the number of entries in the queue
+    pub(crate) fn len(&self) -> usize {
+        let (_, head) = unpack(self.0.head.load(Acquire));
+        let tail = self.0.tail.load(Acquire);
+        len(head, tail)
+    }
+
+    /// Return true if the queue is empty,
+    /// false if there are any entries in the queue
     pub(crate) fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.len() == 0
     }
 
     /// Steals half the tasks from self and place them into `dst`.
@@ -490,8 +504,7 @@ impl<T> Steal<T> {
 
         assert!(
             n <= LOCAL_QUEUE_CAPACITY as UnsignedShort / 2,
-            "actual = {}",
-            n
+            "actual = {n}"
         );
 
         let (first, _) = unpack(next_packed);
@@ -546,14 +559,6 @@ impl<T> Steal<T> {
     }
 }
 
-cfg_metrics! {
-    impl<T> Steal<T> {
-        pub(crate) fn len(&self) -> usize {
-            self.0.len() as _
-        }
-    }
-}
-
 impl<T> Clone for Steal<T> {
     fn clone(&self) -> Steal<T> {
         Steal(self.0.clone())
@@ -568,24 +573,10 @@ impl<T> Drop for Local<T> {
     }
 }
 
-impl<T> Inner<T> {
-    fn remaining_slots(&self) -> usize {
-        let (steal, _) = unpack(self.head.load(Acquire));
-        let tail = self.tail.load(Acquire);
-
-        LOCAL_QUEUE_CAPACITY - (tail.wrapping_sub(steal) as usize)
-    }
-
-    fn len(&self) -> UnsignedShort {
-        let (_, head) = unpack(self.head.load(Acquire));
-        let tail = self.tail.load(Acquire);
-
-        tail.wrapping_sub(head)
-    }
-
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
+/// Calculate the length of the queue using the head and tail.
+/// The `head` can be the `steal` or `real` head.
+fn len(head: UnsignedShort, tail: UnsignedShort) -> usize {
+    tail.wrapping_sub(head) as usize
 }
 
 /// Split the head value into the real head and the index a stealer is working

@@ -9,19 +9,19 @@
 //! Shutting down the runtime involves the following steps:
 //!
 //!  1. The Shared::close method is called. This closes the inject queue and
-//!     OwnedTasks instance and wakes up all worker threads.
+//!     `OwnedTasks` instance and wakes up all worker threads.
 //!
 //!  2. Each worker thread observes the close signal next time it runs
 //!     Core::maintenance by checking whether the inject queue is closed.
-//!     The Core::is_shutdown flag is set to true.
+//!     The `Core::is_shutdown` flag is set to true.
 //!
 //!  3. The worker thread calls `pre_shutdown` in parallel. Here, the worker
-//!     will keep removing tasks from OwnedTasks until it is empty. No new
-//!     tasks can be pushed to the OwnedTasks during or after this step as it
+//!     will keep removing tasks from `OwnedTasks` until it is empty. No new
+//!     tasks can be pushed to the `OwnedTasks` during or after this step as it
 //!     was closed in step 1.
 //!
 //!  5. The workers call Shared::shutdown to enter the single-threaded phase of
-//!     shutdown. These calls will push their core to Shared::shutdown_cores,
+//!     shutdown. These calls will push their core to `Shared::shutdown_cores`,
 //!     and the last thread to push its core will finish the shutdown procedure.
 //!
 //!  6. The local run queue of each core is emptied, then the inject queue is
@@ -35,22 +35,22 @@
 //!
 //! When spawning tasks during shutdown, there are two cases:
 //!
-//!  * The spawner observes the OwnedTasks being open, and the inject queue is
+//!  * The spawner observes the `OwnedTasks` being open, and the inject queue is
 //!    closed.
-//!  * The spawner observes the OwnedTasks being closed and doesn't check the
+//!  * The spawner observes the `OwnedTasks` being closed and doesn't check the
 //!    inject queue.
 //!
-//! The first case can only happen if the OwnedTasks::bind call happens before
+//! The first case can only happen if the `OwnedTasks::bind` call happens before
 //! or during step 1 of shutdown. In this case, the runtime will clean up the
 //! task in step 3 of shutdown.
 //!
 //! In the latter case, the task was not spawned and the task is immediately
 //! cancelled by the spawner.
 //!
-//! The correctness of shutdown requires both the inject queue and OwnedTasks
+//! The correctness of shutdown requires both the inject queue and `OwnedTasks`
 //! collection to have a closed bit. With a close bit on only the inject queue,
 //! spawning could run in to a situation where a task is successfully bound long
-//! after the runtime has shut down. With a close bit on only the OwnedTasks,
+//! after the runtime has shut down. With a close bit on only the `OwnedTasks`,
 //! the first spawning situation could result in the notification being pushed
 //! to the inject queue after step 6 of shutdown, which would leave a task in
 //! the inject queue indefinitely. This would be a ref-count cycle and a memory
@@ -58,25 +58,23 @@
 
 use crate::loom::sync::{Arc, Mutex};
 use crate::runtime;
-use crate::runtime::context;
 use crate::runtime::scheduler::multi_thread::{
     idle, queue, Counters, Handle, Idle, Overflow, Parker, Stats, TraceStatus, Unparker,
 };
 use crate::runtime::scheduler::{inject, Defer, Lock};
 use crate::runtime::task::OwnedTasks;
-use crate::runtime::{
-    blocking, coop, driver, scheduler, task, Config, SchedulerMetrics, WorkerMetrics,
-};
+use crate::runtime::{blocking, driver, scheduler, task, Config, SchedulerMetrics, WorkerMetrics};
+use crate::runtime::{context, TaskHooks};
+use crate::task::coop;
 use crate::util::atomic_cell::AtomicCell;
 use crate::util::rand::{FastRand, RngSeedGenerator};
 
 use std::cell::RefCell;
 use std::task::Waker;
+use std::thread;
 use std::time::Duration;
 
-cfg_metrics! {
-    mod metrics;
-}
+mod metrics;
 
 cfg_taskdump! {
     mod taskdump;
@@ -184,7 +182,7 @@ pub(crate) struct Shared {
     /// Only held to trigger some code on drop. This is used to get internal
     /// runtime metrics that can be useful when doing performance
     /// investigations. This does nothing (empty struct, no drop impl) unless
-    /// the `tokio_internal_mt_counters` cfg flag is set.
+    /// the `tokio_internal_mt_counters` `cfg` flag is set.
     _counters: Counters,
 }
 
@@ -227,14 +225,11 @@ pub(crate) struct Launch(Vec<Arc<Worker>>);
 /// to stop processing.
 type RunResult = Result<Box<Core>, ()>;
 
-/// A task handle
-type Task = task::Task<Arc<Handle>>;
-
 /// A notified task handle
 type Notified = task::Notified<Arc<Handle>>;
 
 /// Value picked out of thin-air. Running the LIFO slot a handful of times
-/// seemms sufficient to benefit from locality. More than 3 times probably is
+/// seems sufficient to benefit from locality. More than 3 times probably is
 /// overweighing. The value can be tuned in the future with data that shows
 /// improvements.
 const MAX_LIFO_POLLS_PER_TICK: usize = 3;
@@ -283,11 +278,12 @@ pub(super) fn create(
 
     let remotes_len = remotes.len();
     let handle = Arc::new(Handle {
+        task_hooks: TaskHooks::from_config(&config),
         shared: Shared {
             remotes: remotes.into_boxed_slice(),
             inject,
             idle,
-            owned: OwnedTasks::new(),
+            owned: OwnedTasks::new(size),
             synced: Mutex::new(Synced {
                 idle: idle_synced,
                 inject: inject_synced,
@@ -334,6 +330,12 @@ where
                 if let Some(cx) = maybe_cx {
                     if self.take_core {
                         let core = cx.worker.core.take();
+
+                        if core.is_some() {
+                            cx.worker.handle.shared.worker_metrics[cx.worker.index]
+                                .set_thread_id(thread::current().id());
+                        }
+
                         let mut cx_core = cx.core.borrow_mut();
                         assert!(cx_core.is_none());
                         *cx_core = core;
@@ -395,10 +397,18 @@ where
         let cx = maybe_cx.expect("no .is_some() == false cases above should lead here");
 
         // Get the worker core. If none is set, then blocking is fine!
-        let core = match cx.core.borrow_mut().take() {
+        let mut core = match cx.core.borrow_mut().take() {
             Some(core) => core,
             None => return Ok(()),
         };
+
+        // If we heavily call `spawn_blocking`, there might be no available thread to
+        // run this core. Except for the task in the lifo_slot, all tasks can be
+        // stolen, so we move the task out of the lifo_slot to the run_queue.
+        if let Some(task) = core.lifo_slot.take() {
+            core.run_queue
+                .push_back_or_overflow(task, &*cx.worker.handle, &mut core.stats);
+        }
 
         // We are taking the core from the context and sending it to another
         // thread.
@@ -450,6 +460,7 @@ impl Launch {
 }
 
 fn run(worker: Arc<Worker>) {
+    #[allow(dead_code)]
     struct AbortOnPanic;
 
     impl Drop for AbortOnPanic {
@@ -472,6 +483,8 @@ fn run(worker: Arc<Worker>) {
         Some(core) => core,
         None => return,
     };
+
+    worker.handle.shared.worker_metrics[worker.index].set_thread_id(thread::current().id());
 
     let handle = scheduler::Handle::MultiThread(worker.handle.clone());
 
@@ -543,17 +556,20 @@ impl Context {
                 } else {
                     self.park(core)
                 };
+                core.stats.start_processing_scheduled_tasks();
             }
         }
 
         core.pre_shutdown(&self.worker);
-
         // Signal shutdown
         self.worker.handle.shutdown_core(core);
         Err(())
     }
 
     fn run_task(&self, task: Notified, mut core: Box<Core>) -> RunResult {
+        #[cfg(tokio_unstable)]
+        let task_meta = task.task_meta();
+
         let task = self.worker.handle.shared.owned.assert_owner(task);
 
         // Make sure the worker is not in the **searching** state. This enables
@@ -573,7 +589,19 @@ impl Context {
 
         // Run the task
         coop::budget(|| {
+            // Unlike the poll time above, poll start callback is attached to the task id,
+            // so it is tightly associated with the actual poll invocation.
+            #[cfg(tokio_unstable)]
+            self.worker
+                .handle
+                .task_hooks
+                .poll_start_callback(&task_meta);
+
             task.run();
+
+            #[cfg(tokio_unstable)]
+            self.worker.handle.task_hooks.poll_stop_callback(&task_meta);
+
             let mut lifo_polls = 0;
 
             // As long as there is budget remaining and a task exists in the
@@ -636,7 +664,20 @@ impl Context {
                 // Run the LIFO task, then loop
                 *self.core.borrow_mut() = Some(core);
                 let task = self.worker.handle.shared.owned.assert_owner(task);
+
+                #[cfg(tokio_unstable)]
+                let task_meta = task.task_meta();
+
+                #[cfg(tokio_unstable)]
+                self.worker
+                    .handle
+                    .task_hooks
+                    .poll_start_callback(&task_meta);
+
                 task.run();
+
+                #[cfg(tokio_unstable)]
+                self.worker.handle.task_hooks.poll_stop_callback(&task_meta);
             }
         })
     }
@@ -677,7 +718,7 @@ impl Context {
     /// Also important to notice that, before parking, the worker thread will try to take
     /// ownership of the Driver (IO/Time) and dispatch any events that might have fired.
     /// Whenever a worker thread executes the Driver loop, all waken tasks are scheduled
-    /// in its own local queue until the queue saturates (ntasks > LOCAL_QUEUE_CAPACITY).
+    /// in its own local queue until the queue saturates (ntasks > `LOCAL_QUEUE_CAPACITY`).
     /// When the local queue is saturated, the overflow tasks are added to the injection queue
     /// from where other workers can pick them up.
     /// Also, we rely on the workstealing algorithm to spread the tasks amongst workers
@@ -690,7 +731,12 @@ impl Context {
         if core.transition_to_parked(&self.worker) {
             while !core.is_shutdown && !core.is_traced {
                 core.stats.about_to_park();
+                core.stats
+                    .submit(&self.worker.handle.shared.worker_metrics[self.worker.index]);
+
                 core = self.park_timeout(core, None);
+
+                core.stats.unparked();
 
                 // Run regularly scheduled maintenance
                 core.maintenance(&self.worker);
@@ -739,7 +785,13 @@ impl Context {
     }
 
     pub(crate) fn defer(&self, waker: &Waker) {
-        self.defer.defer(waker);
+        if self.core.borrow().is_none() {
+            // If there is no core, then the worker is currently in a block_in_place. In this case,
+            // we cannot use the defer queue as we aren't really in the current runtime.
+            waker.wake_by_ref();
+        } else {
+            self.defer.defer(waker);
+        }
     }
 }
 
@@ -788,14 +840,14 @@ impl Core {
             );
 
             // Take at least one task since the first task is returned directly
-            // and nto pushed onto the local queue.
+            // and not pushed onto the local queue.
             let n = usize::max(1, n);
 
             let mut synced = worker.handle.shared.synced.lock();
             // safety: passing in the correct `inject::Synced`.
             let mut tasks = unsafe { worker.inject().pop_n(&mut synced.inject, n) };
 
-            // Pop the first task to return immedietly
+            // Pop the first task to return immediately
             let ret = tasks.next();
 
             // Push the rest of the on the run queue
@@ -954,8 +1006,16 @@ impl Core {
     /// Signals all tasks to shut down, and waits for them to complete. Must run
     /// before we enter the single-threaded phase of shutdown processing.
     fn pre_shutdown(&mut self, worker: &Worker) {
+        // Start from a random inner list
+        let start = self
+            .rand
+            .fastrand_n(worker.handle.shared.owned.get_shard_size() as u32);
         // Signal to all tasks to shut down.
-        worker.handle.shared.owned.close_and_shutdown_all();
+        worker
+            .handle
+            .shared
+            .owned
+            .close_and_shutdown_all(start as usize);
 
         self.stats
             .submit(&worker.handle.shared.worker_metrics[worker.index]);
@@ -977,10 +1037,8 @@ impl Core {
             .stats
             .tuned_global_queue_interval(&worker.handle.shared.config);
 
-        debug_assert!(next > 1);
-
         // Smooth out jitter
-        if abs_diff(self.global_queue_interval, next) > 2 {
+        if u32::abs_diff(self.global_queue_interval, next) > 2 {
             self.global_queue_interval = next;
         }
     }
@@ -990,21 +1048,6 @@ impl Worker {
     /// Returns a reference to the scheduler's injection queue.
     fn inject(&self) -> &inject::Shared<Arc<Handle>> {
         &self.handle.shared.inject
-    }
-}
-
-// TODO: Move `Handle` impls into handle.rs
-impl task::Schedule for Arc<Handle> {
-    fn release(&self, task: &Task) -> Option<Task> {
-        self.shared.owned.remove(task)
-    }
-
-    fn schedule(&self, task: Notified) {
-        self.schedule_task(task, false);
-    }
-
-    fn yield_now(&self, task: Notified) {
-        self.schedule_task(task, true);
     }
 }
 
@@ -1025,7 +1068,7 @@ impl Handle {
             // Otherwise, use the inject queue.
             self.push_remote_task(task);
             self.notify_parked_remote();
-        })
+        });
     }
 
     pub(super) fn schedule_option_task_without_yield(&self, task: Option<Notified>) {
@@ -1214,13 +1257,4 @@ fn with_current<R>(f: impl FnOnce(Option<&Context>) -> R) -> R {
         Some(MultiThread(ctx)) => f(Some(ctx)),
         _ => f(None),
     })
-}
-
-// `u32::abs_diff` is not available on Tokio's MSRV.
-fn abs_diff(a: u32, b: u32) -> u32 {
-    if a > b {
-        a - b
-    } else {
-        b - a
-    }
 }

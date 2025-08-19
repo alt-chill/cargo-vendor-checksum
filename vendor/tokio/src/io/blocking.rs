@@ -5,8 +5,9 @@ use std::cmp;
 use std::future::Future;
 use std::io;
 use std::io::prelude::*;
+use std::mem::MaybeUninit;
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::task::{ready, Context, Poll};
 
 /// `T` should not implement _both_ Read and Write.
 #[derive(Debug)]
@@ -23,7 +24,7 @@ pub(crate) struct Buf {
     pos: usize,
 }
 
-pub(crate) const MAX_BUF: usize = 2 * 1024 * 1024;
+pub(crate) const DEFAULT_MAX_BUF_SIZE: usize = 2 * 1024 * 1024;
 
 #[derive(Debug)]
 enum State<T> {
@@ -33,8 +34,13 @@ enum State<T> {
 
 cfg_io_blocking! {
     impl<T> Blocking<T> {
+        /// # Safety
+        ///
+        /// The `Read` implementation of `inner` must never read from the buffer
+        /// it is borrowing and must correctly report the length of the data
+        /// written into the buffer.
         #[cfg_attr(feature = "fs", allow(dead_code))]
-        pub(crate) fn new(inner: T) -> Blocking<T> {
+        pub(crate) unsafe fn new(inner: T) -> Blocking<T> {
             Blocking {
                 inner: Some(inner),
                 state: State::Idle(Some(Buf::with_capacity(0))),
@@ -64,11 +70,12 @@ where
                         return Poll::Ready(Ok(()));
                     }
 
-                    buf.ensure_capacity_for(dst);
                     let mut inner = self.inner.take().unwrap();
 
+                    let max_buf_size = cmp::min(dst.remaining(), DEFAULT_MAX_BUF_SIZE);
                     self.state = State::Busy(sys::run(move || {
-                        let res = buf.read_from(&mut inner);
+                        // SAFETY: the requirements are satisfied by `Blocking::new`.
+                        let res = unsafe { buf.read_from(&mut inner, max_buf_size) };
                         (res, buf, inner)
                     }));
                 }
@@ -111,12 +118,12 @@ where
 
                     assert!(buf.is_empty());
 
-                    let n = buf.copy_from(src);
+                    let n = buf.copy_from(src, DEFAULT_MAX_BUF_SIZE);
                     let mut inner = self.inner.take().unwrap();
 
                     self.state = State::Busy(sys::run(move || {
                         let n = buf.len();
-                        let res = buf.write_to(&mut inner).map(|_| n);
+                        let res = buf.write_to(&mut inner).map(|()| n);
 
                         (res, buf, inner)
                     }));
@@ -147,7 +154,7 @@ where
                         let mut inner = self.inner.take().unwrap();
 
                         self.state = State::Busy(sys::run(move || {
-                            let res = inner.flush().map(|_| 0);
+                            let res = inner.flush().map(|()| 0);
                             (res, buf, inner)
                         }));
 
@@ -214,10 +221,10 @@ impl Buf {
         n
     }
 
-    pub(crate) fn copy_from(&mut self, src: &[u8]) -> usize {
+    pub(crate) fn copy_from(&mut self, src: &[u8], max_buf_size: usize) -> usize {
         assert!(self.is_empty());
 
-        let n = cmp::min(src.len(), MAX_BUF);
+        let n = cmp::min(src.len(), max_buf_size);
 
         self.buf.extend_from_slice(&src[..n]);
         n
@@ -227,25 +234,30 @@ impl Buf {
         &self.buf[self.pos..]
     }
 
-    pub(crate) fn ensure_capacity_for(&mut self, bytes: &ReadBuf<'_>) {
+    /// # Safety
+    ///
+    /// `rd` must not read from the buffer `read` is borrowing and must correctly
+    /// report the length of the data written into the buffer.
+    pub(crate) unsafe fn read_from<T: Read>(
+        &mut self,
+        rd: &mut T,
+        max_buf_size: usize,
+    ) -> io::Result<usize> {
         assert!(self.is_empty());
+        self.buf.reserve(max_buf_size);
 
-        let len = cmp::min(bytes.remaining(), MAX_BUF);
-
-        if self.buf.len() < len {
-            self.buf.reserve(len - self.buf.len());
-        }
-
-        unsafe {
-            self.buf.set_len(len);
-        }
-    }
-
-    pub(crate) fn read_from<T: Read>(&mut self, rd: &mut T) -> io::Result<usize> {
-        let res = uninterruptibly!(rd.read(&mut self.buf));
+        let buf = &mut self.buf.spare_capacity_mut()[..max_buf_size];
+        // SAFETY: The memory may be uninitialized, but `rd.read` will only write to the buffer.
+        let buf = unsafe { &mut *(buf as *mut [MaybeUninit<u8>] as *mut [u8]) };
+        let res = uninterruptibly!(rd.read(buf));
 
         if let Ok(n) = res {
-            self.buf.truncate(n);
+            // SAFETY: the caller promises that `rd.read` initializes
+            // a section of `buf` and correctly reports that length.
+            // The `self.is_empty()` assertion verifies that `n`
+            // equals the length of the `buf` capacity that was written
+            // to (and that `buf` isn't being shrunk).
+            unsafe { self.buf.set_len(n) }
         } else {
             self.buf.clear();
         }
@@ -274,10 +286,10 @@ cfg_fs! {
             ret
         }
 
-        pub(crate) fn copy_from_bufs(&mut self, bufs: &[io::IoSlice<'_>]) -> usize {
+        pub(crate) fn copy_from_bufs(&mut self, bufs: &[io::IoSlice<'_>], max_buf_size: usize) -> usize {
             assert!(self.is_empty());
 
-            let mut rem = MAX_BUF;
+            let mut rem = max_buf_size;
             for buf in bufs {
                 if rem == 0 {
                     break
@@ -288,7 +300,7 @@ cfg_fs! {
                 rem -= len;
             }
 
-            MAX_BUF - rem
+            max_buf_size - rem
         }
     }
 }

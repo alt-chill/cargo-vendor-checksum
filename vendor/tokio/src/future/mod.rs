@@ -5,9 +5,6 @@
 #[cfg(any(feature = "macros", feature = "process"))]
 pub(crate) mod maybe_done;
 
-mod poll_fn;
-pub use poll_fn::poll_fn;
-
 cfg_process! {
     mod try_join;
     pub(crate) use try_join::try_join3;

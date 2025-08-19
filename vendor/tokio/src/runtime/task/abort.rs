@@ -11,7 +11,14 @@ use std::panic::{RefUnwindSafe, UnwindSafe};
 /// Dropping an `AbortHandle` releases the permission to terminate the task
 /// --- it does *not* abort the task.
 ///
+/// Be aware that tasks spawned using [`spawn_blocking`] cannot be aborted
+/// because they are not async. If you call `abort` on a `spawn_blocking` task,
+/// then this *will not have any effect*, and the task will continue running
+/// normally. The exception is if the task has not started running yet; in that
+/// case, calling `abort` may prevent the task from starting.
+///
 /// [`JoinHandle`]: crate::task::JoinHandle
+/// [`spawn_blocking`]: crate::task::spawn_blocking
 #[cfg_attr(docsrs, doc(cfg(feature = "rt")))]
 pub struct AbortHandle {
     raw: RawTask,
@@ -31,8 +38,18 @@ impl AbortHandle {
     /// If the task was already cancelled, such as by [`JoinHandle::abort`],
     /// this method will do nothing.
     ///
+    /// Be aware that tasks spawned using [`spawn_blocking`] cannot be aborted
+    /// because they are not async. If you call `abort` on a `spawn_blocking`
+    /// task, then this *will not have any effect*, and the task will continue
+    /// running normally. The exception is if the task has not started running
+    /// yet; in that case, calling `abort` may prevent the task from starting.
+    ///
+    /// See also [the module level docs] for more information on cancellation.
+    ///
     /// [cancelled]: method@super::error::JoinError::is_cancelled
     /// [`JoinHandle::abort`]: method@super::JoinHandle::abort
+    /// [the module level docs]: crate::task#cancellation
+    /// [`spawn_blocking`]: crate::task::spawn_blocking
     pub fn abort(&self) {
         self.raw.remote_abort();
     }
@@ -51,14 +68,7 @@ impl AbortHandle {
     /// Returns a [task ID] that uniquely identifies this task relative to other
     /// currently spawned tasks.
     ///
-    /// **Note**: This is an [unstable API][unstable]. The public API of this type
-    /// may break in 1.x releases. See [the documentation on unstable
-    /// features][unstable] for details.
-    ///
     /// [task ID]: crate::task::Id
-    /// [unstable]: crate#unstable-features
-    #[cfg(tokio_unstable)]
-    #[cfg_attr(docsrs, doc(cfg(tokio_unstable)))]
     pub fn id(&self) -> super::Id {
         // Safety: The header pointer is valid.
         unsafe { Header::get_id(self.raw.header_ptr()) }
@@ -83,5 +93,13 @@ impl fmt::Debug for AbortHandle {
 impl Drop for AbortHandle {
     fn drop(&mut self) {
         self.raw.drop_abort_handle();
+    }
+}
+
+impl Clone for AbortHandle {
+    /// Returns a cloned `AbortHandle` that can be used to remotely abort this task.
+    fn clone(&self) -> Self {
+        self.raw.ref_inc();
+        Self::new(self.raw)
     }
 }

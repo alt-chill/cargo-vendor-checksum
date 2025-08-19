@@ -1,8 +1,8 @@
 use crate::sync::oneshot;
 
-use futures::future::poll_fn;
 use loom::future::block_on;
 use loom::thread;
+use std::future::poll_fn;
 use std::task::Poll::{Pending, Ready};
 
 #[test]
@@ -136,5 +136,52 @@ fn changing_tx_task() {
             // Previous task parked, use a new task...
             block_on(OnClose::new(&mut tx));
         }
+    });
+}
+
+#[test]
+fn checking_tx_send_ok_not_drop() {
+    use std::borrow::Borrow;
+    use std::cell::Cell;
+
+    loom::thread_local! {
+        static IS_RX: Cell<bool> = Cell::new(true);
+    }
+
+    struct Msg;
+
+    impl Drop for Msg {
+        fn drop(&mut self) {
+            IS_RX.with(|is_rx: &Cell<_>| {
+                // On `tx.send(msg)` returning `Err(msg)`,
+                // we call `std::mem::forget(msg)`, so that
+                // `drop` is not expected to be called in the
+                // tx thread.
+                assert!(is_rx.get());
+            });
+        }
+    }
+
+    let mut builder = loom::model::Builder::new();
+    builder.preemption_bound = Some(2);
+
+    builder.check(|| {
+        let (tx, rx) = oneshot::channel();
+
+        // tx thread
+        let tx_thread_join_handle = thread::spawn(move || {
+            // Ensure that `Msg::drop` in this thread will see is_rx == false
+            IS_RX.with(|is_rx: &Cell<_>| {
+                is_rx.set(false);
+            });
+            if let Err(msg) = tx.send(Msg) {
+                std::mem::forget(msg);
+            }
+        });
+
+        // main thread is the rx thread
+        drop(rx);
+
+        tx_thread_join_handle.join().unwrap();
     });
 }

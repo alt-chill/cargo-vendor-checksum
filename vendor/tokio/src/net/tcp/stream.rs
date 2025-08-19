@@ -1,18 +1,19 @@
 cfg_not_wasi! {
-    use crate::future::poll_fn;
     use crate::net::{to_socket_addrs, ToSocketAddrs};
+    use std::future::poll_fn;
     use std::time::Duration;
 }
 
 use crate::io::{AsyncRead, AsyncWrite, Interest, PollEvented, ReadBuf, Ready};
 use crate::net::tcp::split::{split, ReadHalf, WriteHalf};
 use crate::net::tcp::split_owned::{split_owned, OwnedReadHalf, OwnedWriteHalf};
+use crate::util::check_socket_for_blocking;
 
 use std::fmt;
 use std::io;
 use std::net::{Shutdown, SocketAddr};
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::task::{ready, Context, Poll};
 
 cfg_io_util! {
     use bytes::BufMut;
@@ -173,6 +174,10 @@ impl TcpStream {
     /// will block the thread, which will cause unexpected behavior.
     /// Non-blocking mode can be set using [`set_nonblocking`].
     ///
+    /// Passing a listener in blocking mode is always erroneous,
+    /// and the behavior in that case may change in the future.
+    /// For example, it could panic.
+    ///
     /// [`set_nonblocking`]: std::net::TcpStream::set_nonblocking
     ///
     /// # Examples
@@ -200,6 +205,8 @@ impl TcpStream {
     /// explicitly with [`Runtime::enter`](crate::runtime::Runtime::enter) function.
     #[track_caller]
     pub fn from_std(stream: std::net::TcpStream) -> io::Result<TcpStream> {
+        check_socket_for_blocking(&stream)?;
+
         let io = mio::net::TcpStream::from_std(stream);
         let io = PollEvented::new(io)?;
         Ok(TcpStream { io })
@@ -221,11 +228,16 @@ impl TcpStream {
     ///
     /// #[tokio::main]
     /// async fn main() -> Result<(), Box<dyn Error>> {
+    /// #   if cfg!(miri) { return Ok(()); } // No `socket` in miri.
     ///     let mut data = [0u8; 12];
+    /// #   if false {
     ///     let listener = TcpListener::bind("127.0.0.1:34254").await?;
-    /// #   let handle = tokio::spawn(async {
-    /// #       let mut stream: TcpStream = TcpStream::connect("127.0.0.1:34254").await.unwrap();
-    /// #       stream.write(b"Hello world!").await.unwrap();
+    /// #   }
+    /// #   let listener = TcpListener::bind("127.0.0.1:0").await?;
+    /// #   let addr = listener.local_addr().unwrap();
+    /// #   let handle = tokio::spawn(async move {
+    /// #       let mut stream: TcpStream = TcpStream::connect(addr).await.unwrap();
+    /// #       stream.write_all(b"Hello world!").await.unwrap();
     /// #   });
     ///     let (tokio_tcp_stream, _) = listener.accept().await?;
     ///     let mut std_tcp_stream = tokio_tcp_stream.into_std()?;
@@ -245,7 +257,7 @@ impl TcpStream {
             use std::os::unix::io::{FromRawFd, IntoRawFd};
             self.io
                 .into_inner()
-                .map(|io| io.into_raw_fd())
+                .map(IntoRawFd::into_raw_fd)
                 .map(|raw_fd| unsafe { std::net::TcpStream::from_raw_fd(raw_fd) })
         }
 
@@ -336,7 +348,7 @@ impl TcpStream {
     /// use tokio::io::{self, ReadBuf};
     /// use tokio::net::TcpStream;
     ///
-    /// use futures::future::poll_fn;
+    /// use std::future::poll_fn;
     ///
     /// #[tokio::main]
     /// async fn main() -> io::Result<()> {
@@ -915,7 +927,7 @@ impl TcpStream {
     /// were written.
     ///
     /// Data is written from each buffer in order, with the final buffer read
-    /// from possible being only partially consumed. This method behaves
+    /// from possibly being only partially consumed. This method behaves
     /// equivalently to a single call to [`try_write()`] with concatenated
     /// buffers.
     ///
@@ -1056,7 +1068,7 @@ impl TcpStream {
     /// returns the number of bytes peeked.
     ///
     /// Successive calls return the same data. This is accomplished by passing
-    /// `MSG_PEEK` as a flag to the underlying recv system call.
+    /// `MSG_PEEK` as a flag to the underlying `recv` system call.
     ///
     /// # Examples
     ///
@@ -1100,8 +1112,16 @@ impl TcpStream {
     /// This function will cause all pending and future I/O on the specified
     /// portions to return immediately with an appropriate value (see the
     /// documentation of `Shutdown`).
+    ///
+    /// Remark: this function transforms `Err(std::io::ErrorKind::NotConnected)` to `Ok(())`.
+    /// It does this to abstract away OS specific logic and to prevent a race condition between
+    /// this function call and the OS closing this socket because of external events (e.g. TCP reset).
+    /// See <https://github.com/tokio-rs/tokio/issues/4665> for more information.
     pub(super) fn shutdown_std(&self, how: Shutdown) -> io::Result<()> {
-        self.io.shutdown(how)
+        match self.io.shutdown(how) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotConnected => Ok(()),
+            result => result,
+        }
     }
 
     /// Gets the value of the `TCP_NODELAY` option on this socket.
@@ -1174,13 +1194,13 @@ impl TcpStream {
             socket2::SockRef::from(self).linger()
         }
 
-        /// Sets the linger duration of this socket by setting the SO_LINGER option.
+        /// Sets the linger duration of this socket by setting the `SO_LINGER` option.
         ///
         /// This option controls the action taken when a stream has unsent messages and the stream is
-        /// closed. If SO_LINGER is set, the system shall block the process until it can transmit the
+        /// closed. If `SO_LINGER` is set, the system shall block the process until it can transmit the
         /// data or until the time expires.
         ///
-        /// If SO_LINGER is not specified, and the stream is closed, the system handles the call in a
+        /// If `SO_LINGER` is not specified, and the stream is closed, the system handles the call in a
         /// way that allows the process to continue as quickly as possible.
         ///
         /// # Examples
@@ -1274,7 +1294,7 @@ impl TcpStream {
 
     // == Poll IO functions that takes `&self` ==
     //
-    // To read or write without mutable access to the `UnixStream`, combine the
+    // To read or write without mutable access to the `TcpStream`, combine the
     // `poll_read_ready` or `poll_write_ready` methods with the `try_read` or
     // `try_write` methods.
 

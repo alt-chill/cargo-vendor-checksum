@@ -21,7 +21,7 @@ pub(crate) use write_guard::RwLockWriteGuard;
 pub(crate) use write_guard_mapped::RwLockMappedWriteGuard;
 
 #[cfg(not(loom))]
-const MAX_READS: u32 = std::u32::MAX >> 3;
+const MAX_READS: u32 = u32::MAX >> 3;
 
 #[cfg(loom)]
 const MAX_READS: u32 = 10;
@@ -209,6 +209,7 @@ impl<T: ?Sized> RwLock<T> {
         let resource_span = {
             let location = std::panic::Location::caller();
             let resource_span = tracing::trace_span!(
+                parent: None,
                 "runtime.resource",
                 concrete_type = "RwLock",
                 kind = "Sync",
@@ -273,8 +274,7 @@ impl<T: ?Sized> RwLock<T> {
     {
         assert!(
             max_reads <= MAX_READS,
-            "a RwLock may not be created with more than {} readers",
-            MAX_READS
+            "a RwLock may not be created with more than {MAX_READS} readers"
         );
 
         #[cfg(all(tokio_unstable, feature = "tracing"))]
@@ -282,6 +282,7 @@ impl<T: ?Sized> RwLock<T> {
             let location = std::panic::Location::caller();
 
             let resource_span = tracing::trace_span!(
+                parent: None,
                 "runtime.resource",
                 concrete_type = "RwLock",
                 kind = "Sync",
@@ -770,7 +771,7 @@ impl<T: ?Sized> RwLock<T> {
     /// ```
     pub async fn write(&self) -> RwLockWriteGuard<'_, T> {
         let acquire_fut = async {
-            self.s.acquire(self.mr).await.unwrap_or_else(|_| {
+            self.s.acquire(self.mr as usize).await.unwrap_or_else(|_| {
                 // The semaphore was closed. but, we never explicitly close it, and we have a
                 // handle to it through the Arc, which means that this can never happen.
                 unreachable!()
@@ -905,7 +906,7 @@ impl<T: ?Sized> RwLock<T> {
         let resource_span = self.resource_span.clone();
 
         let acquire_fut = async {
-            self.s.acquire(self.mr).await.unwrap_or_else(|_| {
+            self.s.acquire(self.mr as usize).await.unwrap_or_else(|_| {
                 // The semaphore was closed. but, we never explicitly close it, and we have a
                 // handle to it through the Arc, which means that this can never happen.
                 unreachable!()
@@ -969,7 +970,7 @@ impl<T: ?Sized> RwLock<T> {
     /// }
     /// ```
     pub fn try_write(&self) -> Result<RwLockWriteGuard<'_, T>, TryLockError> {
-        match self.s.try_acquire(self.mr) {
+        match self.s.try_acquire(self.mr as usize) {
             Ok(permit) => permit,
             Err(TryAcquireError::NoPermits) => return Err(TryLockError(())),
             Err(TryAcquireError::Closed) => unreachable!(),
@@ -1027,7 +1028,7 @@ impl<T: ?Sized> RwLock<T> {
     /// }
     /// ```
     pub fn try_write_owned(self: Arc<Self>) -> Result<OwnedRwLockWriteGuard<T>, TryLockError> {
-        match self.s.try_acquire(self.mr) {
+        match self.s.try_acquire(self.mr as usize) {
             Ok(permit) => permit,
             Err(TryAcquireError::NoPermits) => return Err(TryLockError(())),
             Err(TryAcquireError::Closed) => unreachable!(),
@@ -1093,7 +1094,7 @@ impl<T> From<T> for RwLock<T> {
     }
 }
 
-impl<T: ?Sized> Default for RwLock<T>
+impl<T> Default for RwLock<T>
 where
     T: Default,
 {

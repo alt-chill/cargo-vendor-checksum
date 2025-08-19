@@ -6,12 +6,14 @@ use crate::runtime::blocking::schedule::BlockingSchedule;
 use crate::runtime::blocking::{shutdown, BlockingTask};
 use crate::runtime::builder::ThreadNameFn;
 use crate::runtime::task::{self, JoinHandle};
-use crate::runtime::{Builder, Callback, Handle};
+use crate::runtime::{Builder, Callback, Handle, BOX_FUTURE_THRESHOLD};
+use crate::util::metric_atomics::MetricAtomicUsize;
+use crate::util::trace::{blocking_task, SpawnMeta};
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::io;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 pub(crate) struct BlockingPool {
@@ -26,9 +28,9 @@ pub(crate) struct Spawner {
 
 #[derive(Default)]
 pub(crate) struct SpawnerMetrics {
-    num_threads: AtomicUsize,
-    num_idle_threads: AtomicUsize,
-    queue_depth: AtomicUsize,
+    num_threads: MetricAtomicUsize,
+    num_idle_threads: MetricAtomicUsize,
+    queue_depth: MetricAtomicUsize,
 }
 
 impl SpawnerMetrics {
@@ -40,34 +42,34 @@ impl SpawnerMetrics {
         self.num_idle_threads.load(Ordering::Relaxed)
     }
 
-    cfg_metrics! {
+    cfg_unstable_metrics! {
         fn queue_depth(&self) -> usize {
             self.queue_depth.load(Ordering::Relaxed)
         }
     }
 
     fn inc_num_threads(&self) {
-        self.num_threads.fetch_add(1, Ordering::Relaxed);
+        self.num_threads.increment();
     }
 
     fn dec_num_threads(&self) {
-        self.num_threads.fetch_sub(1, Ordering::Relaxed);
+        self.num_threads.decrement();
     }
 
     fn inc_num_idle_threads(&self) {
-        self.num_idle_threads.fetch_add(1, Ordering::Relaxed);
+        self.num_idle_threads.increment();
     }
 
     fn dec_num_idle_threads(&self) -> usize {
-        self.num_idle_threads.fetch_sub(1, Ordering::Relaxed)
+        self.num_idle_threads.decrement()
     }
 
     fn inc_queue_depth(&self) {
-        self.queue_depth.fetch_add(1, Ordering::Relaxed);
+        self.queue_depth.increment();
     }
 
     fn dec_queue_depth(&self) {
-        self.queue_depth.fetch_sub(1, Ordering::Relaxed);
+        self.queue_depth.decrement();
     }
 }
 
@@ -105,16 +107,16 @@ struct Shared {
     num_notify: u32,
     shutdown: bool,
     shutdown_tx: Option<shutdown::Sender>,
-    /// Prior to shutdown, we clean up JoinHandles by having each timed-out
+    /// Prior to shutdown, we clean up `JoinHandles` by having each timed-out
     /// thread join on the previous timed-out thread. This is not strictly
     /// necessary but helps avoid Valgrind false positives, see
     /// <https://github.com/tokio-rs/tokio/commit/646fbae76535e397ef79dbcaacb945d4c829f666>
     /// for more information.
     last_exiting_thread: Option<thread::JoinHandle<()>>,
-    /// This holds the JoinHandles for all running threads; on shutdown, the thread
+    /// This holds the `JoinHandles` for all running threads; on shutdown, the thread
     /// calling shutdown handles joining on these.
     worker_threads: HashMap<usize, thread::JoinHandle<()>>,
-    /// This is a counter used to iterate worker_threads in a consistent order (for loom's
+    /// This is a counter used to iterate `worker_threads` in a consistent order (for loom's
     /// benefit).
     worker_thread_index: usize,
 }
@@ -126,7 +128,7 @@ pub(crate) struct Task {
 
 #[derive(PartialEq, Eq)]
 pub(crate) enum Mandatory {
-    #[cfg_attr(not(fs), allow(dead_code))]
+    #[cfg_attr(not(feature = "fs"), allow(dead_code))]
     Mandatory,
     NonMandatory,
 }
@@ -228,7 +230,7 @@ impl BlockingPool {
                     before_stop: builder.before_stop.clone(),
                     thread_cap,
                     keep_alive,
-                    metrics: Default::default(),
+                    metrics: SpawnerMetrics::default(),
                 }),
             },
             shutdown_rx,
@@ -259,14 +261,18 @@ impl BlockingPool {
         drop(shared);
 
         if self.shutdown_rx.wait(timeout) {
-            let _ = last_exited_thread.map(|th| th.join());
+            let _ = last_exited_thread.map(thread::JoinHandle::join);
 
             // Loom requires that execution be deterministic, so sort by thread ID before joining.
             // (HashMaps use a randomly-seeded hash function, so the order is nondeterministic)
-            let mut workers: Vec<(usize, thread::JoinHandle<()>)> = workers.into_iter().collect();
-            workers.sort_by_key(|(id, _)| *id);
+            #[cfg(loom)]
+            let workers: Vec<(usize, thread::JoinHandle<()>)> = {
+                let mut workers: Vec<_> = workers.into_iter().collect();
+                workers.sort_by_key(|(id, _)| *id);
+                workers
+            };
 
-            for (_id, handle) in workers.into_iter() {
+            for (_id, handle) in workers {
                 let _ = handle.join();
             }
         }
@@ -294,19 +300,29 @@ impl Spawner {
         F: FnOnce() -> R + Send + 'static,
         R: Send + 'static,
     {
-        let (join_handle, spawn_result) =
-            if cfg!(debug_assertions) && std::mem::size_of::<F>() > 2048 {
-                self.spawn_blocking_inner(Box::new(func), Mandatory::NonMandatory, None, rt)
-            } else {
-                self.spawn_blocking_inner(func, Mandatory::NonMandatory, None, rt)
-            };
+        let fn_size = std::mem::size_of::<F>();
+        let (join_handle, spawn_result) = if fn_size > BOX_FUTURE_THRESHOLD {
+            self.spawn_blocking_inner(
+                Box::new(func),
+                Mandatory::NonMandatory,
+                SpawnMeta::new_unnamed(fn_size),
+                rt,
+            )
+        } else {
+            self.spawn_blocking_inner(
+                func,
+                Mandatory::NonMandatory,
+                SpawnMeta::new_unnamed(fn_size),
+                rt,
+            )
+        };
 
         match spawn_result {
             Ok(()) => join_handle,
             // Compat: do not panic here, return the join_handle even though it will never resolve
             Err(SpawnError::ShuttingDown) => join_handle,
             Err(SpawnError::NoThreads(e)) => {
-                panic!("OS can't spawn worker thread: {}", e)
+                panic!("OS can't spawn worker thread: {e}")
             }
         }
     }
@@ -322,18 +338,19 @@ impl Spawner {
             F: FnOnce() -> R + Send + 'static,
             R: Send + 'static,
         {
-            let (join_handle, spawn_result) = if cfg!(debug_assertions) && std::mem::size_of::<F>() > 2048 {
+            let fn_size = std::mem::size_of::<F>();
+            let (join_handle, spawn_result) = if fn_size > BOX_FUTURE_THRESHOLD {
                 self.spawn_blocking_inner(
                     Box::new(func),
                     Mandatory::Mandatory,
-                    None,
+                    SpawnMeta::new_unnamed(fn_size),
                     rt,
                 )
             } else {
                 self.spawn_blocking_inner(
                     func,
                     Mandatory::Mandatory,
-                    None,
+                    SpawnMeta::new_unnamed(fn_size),
                     rt,
                 )
             };
@@ -351,37 +368,23 @@ impl Spawner {
         &self,
         func: F,
         is_mandatory: Mandatory,
-        name: Option<&str>,
+        spawn_meta: SpawnMeta<'_>,
         rt: &Handle,
     ) -> (JoinHandle<R>, Result<(), SpawnError>)
     where
         F: FnOnce() -> R + Send + 'static,
         R: Send + 'static,
     {
-        let fut = BlockingTask::new(func);
         let id = task::Id::next();
-        #[cfg(all(tokio_unstable, feature = "tracing"))]
-        let fut = {
-            use tracing::Instrument;
-            let location = std::panic::Location::caller();
-            let span = tracing::trace_span!(
-                target: "tokio::task::blocking",
-                "runtime.spawn",
-                kind = %"blocking",
-                task.name = %name.unwrap_or_default(),
-                task.id = id.as_u64(),
-                "fn" = %std::any::type_name::<F>(),
-                loc.file = location.file(),
-                loc.line = location.line(),
-                loc.col = location.column(),
-            );
-            fut.instrument(span)
-        };
+        let fut =
+            blocking_task::<F, BlockingTask<F>>(BlockingTask::new(func), spawn_meta, id.as_u64());
 
-        #[cfg(not(all(tokio_unstable, feature = "tracing")))]
-        let _ = name;
-
-        let (task, handle) = task::unowned(fut, BlockingSchedule::new(rt), id);
+        let (task, handle) = task::unowned(
+            fut,
+            BlockingSchedule::new(rt),
+            id,
+            task::SpawnLocation::capture(),
+        );
 
         let spawned = self.spawn_task(Task::new(task, is_mandatory), rt);
         (handle, spawned)
@@ -456,7 +459,7 @@ impl Spawner {
         shutdown_tx: shutdown::Sender,
         rt: &Handle,
         id: usize,
-    ) -> std::io::Result<thread::JoinHandle<()>> {
+    ) -> io::Result<thread::JoinHandle<()>> {
         let mut builder = thread::Builder::new().name((self.inner.thread_name)());
 
         if let Some(stack_size) = self.inner.stack_size {
@@ -474,7 +477,7 @@ impl Spawner {
     }
 }
 
-cfg_metrics! {
+cfg_unstable_metrics! {
     impl Spawner {
         pub(crate) fn num_threads(&self) -> usize {
             self.inner.metrics.num_threads()
@@ -492,14 +495,14 @@ cfg_metrics! {
 
 // Tells whether the error when spawning a thread is temporary.
 #[inline]
-fn is_temporary_os_thread_error(error: &std::io::Error) -> bool {
-    matches!(error.kind(), std::io::ErrorKind::WouldBlock)
+fn is_temporary_os_thread_error(error: &io::Error) -> bool {
+    matches!(error.kind(), io::ErrorKind::WouldBlock)
 }
 
 impl Inner {
     fn run(&self, worker_thread_id: usize) {
         if let Some(f) = &self.after_start {
-            f()
+            f();
         }
 
         let mut shared = self.shared.lock();
@@ -575,9 +578,10 @@ impl Inner {
         // with a descriptive message if it is not the
         // case.
         let prev_idle = self.metrics.dec_num_idle_threads();
-        if prev_idle < self.metrics.num_idle_threads() {
-            panic!("num_idle_threads underflowed on thread exit")
-        }
+        assert!(
+            prev_idle >= self.metrics.num_idle_threads(),
+            "num_idle_threads underflowed on thread exit"
+        );
 
         if shared.shutdown && self.metrics.num_threads() == 0 {
             self.condvar.notify_one();
@@ -586,7 +590,7 @@ impl Inner {
         drop(shared);
 
         if let Some(f) = &self.before_stop {
-            f()
+            f();
         }
 
         if let Some(handle) = join_on_thread {

@@ -10,10 +10,16 @@
 # See Cargo.toml.orig for the original contents.
 
 [package]
-edition = "2018"
-rust-version = "1.38"
+edition = "2021"
+rust-version = "1.61"
 name = "crossbeam-deque"
-version = "0.8.3"
+version = "0.8.6"
+build = false
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
 description = "Concurrent work-stealing deque"
 homepage = "https://github.com/crossbeam-rs/crossbeam/tree/master/crossbeam-deque"
 readme = "README.md"
@@ -31,17 +37,32 @@ categories = [
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/crossbeam-rs/crossbeam"
 
-[dependencies.cfg-if]
-version = "1"
+[lib]
+name = "crossbeam_deque"
+path = "src/lib.rs"
+
+[[test]]
+name = "fifo"
+path = "tests/fifo.rs"
+
+[[test]]
+name = "injector"
+path = "tests/injector.rs"
+
+[[test]]
+name = "lifo"
+path = "tests/lifo.rs"
+
+[[test]]
+name = "steal"
+path = "tests/steal.rs"
 
 [dependencies.crossbeam-epoch]
-version = "0.9"
-optional = true
+version = "0.9.17"
 default-features = false
 
 [dependencies.crossbeam-utils]
-version = "0.8"
-optional = true
+version = "0.8.18"
 default-features = false
 
 [dev-dependencies.rand]
@@ -52,4 +73,20 @@ default = ["std"]
 std = [
     "crossbeam-epoch/std",
     "crossbeam-utils/std",
+]
+
+[lints.clippy.declare_interior_mutable_const]
+level = "allow"
+priority = 1
+
+[lints.clippy.lint_groups_priority]
+level = "allow"
+priority = 1
+
+[lints.rust.unexpected_cfgs]
+level = "warn"
+priority = 0
+check-cfg = [
+    "cfg(crossbeam_loom)",
+    "cfg(crossbeam_sanitize)",
 ]

@@ -1,5 +1,5 @@
 use crate::loom::thread::AccessError;
-use crate::runtime::coop;
+use crate::task::coop;
 
 use std::cell::Cell;
 
@@ -61,7 +61,7 @@ struct Context {
     rng: Cell<Option<FastRand>>,
 
     /// Tracks the amount of "work" a task may still do before yielding back to
-    /// the sheduler
+    /// the scheduler
     budget: Cell<coop::Budget>,
 
     #[cfg(all(
@@ -131,7 +131,7 @@ pub(crate) fn thread_rng_n(n: u32) -> u32 {
     })
 }
 
-pub(super) fn budget<R>(f: impl FnOnce(&Cell<coop::Budget>) -> R) -> Result<R, AccessError> {
+pub(crate) fn budget<R>(f: impl FnOnce(&Cell<coop::Budget>) -> R) -> Result<R, AccessError> {
     CONTEXT.try_with(|ctx| f(&ctx.budget))
 }
 
@@ -178,7 +178,16 @@ cfg_rt! {
 
     #[track_caller]
     pub(super) fn with_scheduler<R>(f: impl FnOnce(Option<&scheduler::Context>) -> R) -> R {
-        CONTEXT.with(|c| c.scheduler.with(f))
+        let mut f = Some(f);
+        CONTEXT.try_with(|c| {
+            let f = f.take().unwrap();
+            if matches!(c.runtime.get(), EnterRuntime::Entered { .. }) {
+                c.scheduler.with(f)
+            } else {
+                f(None)
+            }
+        })
+            .unwrap_or_else(|_| (f.take().unwrap())(None))
     }
 
     cfg_taskdump! {

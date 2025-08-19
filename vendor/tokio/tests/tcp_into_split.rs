@@ -1,5 +1,6 @@
 #![warn(rust_2018_idioms)]
-#![cfg(all(feature = "full", not(target_os = "wasi")))] // Wasi doesn't support bind
+#![cfg(all(feature = "full", not(target_os = "wasi"), not(miri)))] // Wasi doesn't support bind
+                                                                   // No `socket` on miri.
 
 use std::io::{Error, ErrorKind, Result};
 use std::io::{Read, Write};
@@ -38,7 +39,7 @@ async fn split() -> Result<()> {
             Ok(())
         },
         async {
-            let mut read_buf = vec![0u8; 32];
+            let mut read_buf = [0u8; 32];
             let peek_len1 = read_half.peek(&mut read_buf[..]).await?;
             let peek_len2 = read_half.peek(&mut read_buf[..]).await?;
             assert_eq!(peek_len1, peek_len2);
@@ -97,7 +98,7 @@ async fn drop_write() -> Result<()> {
             Ok(0) => Ok(()),
             Ok(len) => Err(Error::new(
                 ErrorKind::Other,
-                format!("Unexpected read: {} bytes.", len),
+                format!("Unexpected read: {len} bytes."),
             )),
             Err(err) => Err(err),
         };
@@ -122,8 +123,8 @@ async fn drop_write() -> Result<()> {
 
     match read_half.read(&mut read_buf[..]).await {
         Ok(0) => {}
-        Ok(len) => panic!("Unexpected read: {} bytes.", len),
-        Err(err) => panic!("Unexpected error: {}.", err),
+        Ok(len) => panic!("Unexpected read: {len} bytes."),
+        Err(err) => panic!("Unexpected error: {err}."),
     }
 
     handle.join().unwrap().unwrap();

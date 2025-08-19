@@ -1,28 +1,32 @@
-//! Definition of the MaybeDone combinator.
+//! Definition of the [`MaybeDone`] combinator.
 
-use std::future::Future;
-use std::mem;
+use pin_project_lite::pin_project;
+use std::future::{Future, IntoFuture};
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::task::{ready, Context, Poll};
 
-/// A future that may have completed.
-#[derive(Debug)]
-pub enum MaybeDone<Fut: Future> {
-    /// A not-yet-completed future.
-    Future(Fut),
-    /// The output of the completed future.
-    Done(Fut::Output),
-    /// The empty variant after the result of a [`MaybeDone`] has been
-    /// taken using the [`take_output`](MaybeDone::take_output) method.
-    Gone,
+pin_project! {
+    /// A future that may have completed.
+    #[derive(Debug)]
+    #[project = MaybeDoneProj]
+    #[project_replace = MaybeDoneProjReplace]
+    #[repr(C)] // https://github.com/rust-lang/miri/issues/3780
+    pub enum MaybeDone<Fut: Future> {
+        /// A not-yet-completed future.
+        Future { #[pin] future: Fut },
+        /// The output of the completed future.
+        Done { output: Fut::Output },
+        /// The empty variant after the result of a [`MaybeDone`] has been
+        /// taken using the [`take_output`](MaybeDone::take_output) method.
+        Gone,
+    }
 }
 
-// Safe because we never generate `Pin<&mut Fut::Output>`
-impl<Fut: Future + Unpin> Unpin for MaybeDone<Fut> {}
-
 /// Wraps a future into a `MaybeDone`.
-pub fn maybe_done<Fut: Future>(future: Fut) -> MaybeDone<Fut> {
-    MaybeDone::Future(future)
+pub fn maybe_done<F: IntoFuture>(future: F) -> MaybeDone<F::IntoFuture> {
+    MaybeDone::Future {
+        future: future.into_future(),
+    }
 }
 
 impl<Fut: Future> MaybeDone<Fut> {
@@ -31,12 +35,9 @@ impl<Fut: Future> MaybeDone<Fut> {
     /// future has been completed and [`take_output`](MaybeDone::take_output)
     /// has not yet been called.
     pub fn output_mut(self: Pin<&mut Self>) -> Option<&mut Fut::Output> {
-        unsafe {
-            let this = self.get_unchecked_mut();
-            match this {
-                MaybeDone::Done(res) => Some(res),
-                _ => None,
-            }
+        match self.project() {
+            MaybeDoneProj::Done { output } => Some(output),
+            _ => None,
         }
     }
 
@@ -44,17 +45,14 @@ impl<Fut: Future> MaybeDone<Fut> {
     /// towards completion.
     #[inline]
     pub fn take_output(self: Pin<&mut Self>) -> Option<Fut::Output> {
-        unsafe {
-            let this = self.get_unchecked_mut();
-            match this {
-                MaybeDone::Done(_) => {}
-                MaybeDone::Future(_) | MaybeDone::Gone => return None,
-            };
-            if let MaybeDone::Done(output) = mem::replace(this, MaybeDone::Gone) {
-                Some(output)
-            } else {
-                unreachable!()
-            }
+        match *self {
+            MaybeDone::Done { .. } => {}
+            MaybeDone::Future { .. } | MaybeDone::Gone => return None,
+        };
+        if let MaybeDoneProjReplace::Done { output } = self.project_replace(MaybeDone::Gone) {
+            Some(output)
+        } else {
+            unreachable!()
         }
     }
 }
@@ -63,14 +61,63 @@ impl<Fut: Future> Future for MaybeDone<Fut> {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let res = unsafe {
-            match self.as_mut().get_unchecked_mut() {
-                MaybeDone::Future(a) => ready!(Pin::new_unchecked(a).poll(cx)),
-                MaybeDone::Done(_) => return Poll::Ready(()),
-                MaybeDone::Gone => panic!("MaybeDone polled after value taken"),
-            }
+        let output = match self.as_mut().project() {
+            MaybeDoneProj::Future { future } => ready!(future.poll(cx)),
+            MaybeDoneProj::Done { .. } => return Poll::Ready(()),
+            MaybeDoneProj::Gone => panic!("MaybeDone polled after value taken"),
         };
-        self.set(MaybeDone::Done(res));
+        self.set(MaybeDone::Done { output });
         Poll::Ready(())
+    }
+}
+
+// Test for https://github.com/tokio-rs/tokio/issues/6729
+#[cfg(test)]
+mod miri_tests {
+    use super::maybe_done;
+
+    use std::{
+        future::Future,
+        pin::Pin,
+        sync::Arc,
+        task::{Context, Poll, Wake},
+    };
+
+    struct ThingAdder<'a> {
+        thing: &'a mut String,
+    }
+
+    impl Future for ThingAdder<'_> {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            unsafe {
+                *self.get_unchecked_mut().thing += ", world";
+            }
+            Poll::Pending
+        }
+    }
+
+    #[test]
+    fn maybe_done_miri() {
+        let mut thing = "hello".to_owned();
+
+        // The async block is necessary to trigger the miri failure.
+        #[allow(clippy::redundant_async_block)]
+        let fut = async move { ThingAdder { thing: &mut thing }.await };
+
+        let mut fut = maybe_done(fut);
+        let mut fut = unsafe { Pin::new_unchecked(&mut fut) };
+
+        let waker = Arc::new(DummyWaker).into();
+        let mut ctx = Context::from_waker(&waker);
+        assert_eq!(fut.as_mut().poll(&mut ctx), Poll::Pending);
+        assert_eq!(fut.as_mut().poll(&mut ctx), Poll::Pending);
+    }
+
+    struct DummyWaker;
+
+    impl Wake for DummyWaker {
+        fn wake(self: Arc<Self>) {}
     }
 }
