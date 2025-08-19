@@ -16,12 +16,13 @@ use serde::{Deserialize, Serialize};
 #[derive(Args, Debug)]
 #[group(required = true, multiple = false)]
 struct Files {
+    /// Update checksum for specified vendored files
     #[arg(long, alias = "files", short, num_args(1..),  value_name = "FILES")]
     files_in_vendor_dir: Vec<PathBuf>,
-
+    /// Run batch process for specified vendored packages
     #[arg(long, short, num_args(1..))]
     packages: Vec<OsString>,
-
+    /// Run batch process for all vendor packages
     #[arg(long, short)]
     all: bool,
 
@@ -34,13 +35,13 @@ struct Files {
 struct Cli {
     #[command(flatten)]
     files: Files,
-
+    /// Specify the path of vendor folder, when running not from repository directory
     #[arg(long, default_value = "vendor", value_name = "DIR")]
     vendor: PathBuf,
-
+    /// Set 'true' to remove checksum for missing files
     #[arg(long)]
     ignore_missing: bool,
-
+    /// Limit the number of threads or this number will be set automatically
     #[arg(long, value_name("NUM"))]
     num_threads: Option<usize>,
 }
